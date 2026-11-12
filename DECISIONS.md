@@ -272,3 +272,6 @@ Every assumption, deviation and ambiguity resolution made while implementing
 
 ### 2026-11-12 — Coverage
 - Branch coverage (unit tests only): risk 93.5–100%, journal 93.4%, promotion 95.3–100%, live_unlock 94.1%, overall 89.2%. Targets are ≥ 90% / ≥ 75%. CI enforces `--cov-fail-under=75` overall. `adapters/lumibot_bridge.py` is ~37% in unit runs because it talks to Lumibot/Alpaca; the integration tests exercise it.
+
+### 2026-11-12 — End-to-end verification fix: `today` loads `.env`
+- Running the real CLI flow (`init` → `run-paper` → `status` → `journal` → `today`) on the Alpaca paper account showed `lumisafe today` falling back to the offline note: on its own the command never loaded `.env`, so `ANTHROPIC_API_KEY` was unseen. The integration test missed it because the paper cycle had already loaded `.env` in the same process. `advisor_factory` now loads `.env` (without overriding shell variables), with a regression test. After the fix, `today` produced a Claude-written note from the real paper account data.

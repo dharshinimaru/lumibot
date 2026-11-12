@@ -225,3 +225,15 @@ def test_today_command_in_paper_mode(monkeypatch):
     res = CliRunner().invoke(cli.main, ["today"])
     assert res.exit_code == 0, res.output
     assert "Your plan held steady." in res.output and lumisafe.DISCLAIMER in res.output
+
+
+def test_advisor_factory_loads_dotenv_for_standalone_commands(tmp_path, monkeypatch):
+    """Regression: `lumisafe today` run on its own never loaded .env, so the AI note silently fell back."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LUMISAFE_TEST_DOTENV_FLAG", raising=False)
+    (tmp_path / ".env").write_text("LUMISAFE_TEST_DOTENV_FLAG=loaded\n")
+    cli.advisor_factory(LumiSafeConfig.model_validate({"core": {"etfs": {"VTI": 1.0},
+                                                                "monthly_contribution_usd": 0}}))
+    import os
+    assert os.environ.get("LUMISAFE_TEST_DOTENV_FLAG") == "loaded"
+    monkeypatch.delenv("LUMISAFE_TEST_DOTENV_FLAG")

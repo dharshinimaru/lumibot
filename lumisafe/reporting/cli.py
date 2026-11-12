@@ -324,7 +324,10 @@ def reset_halt(what):
 # --- AI daily note + shadow returns ------------------------------------------------------------------
 
 def advisor_factory(config: LumiSafeConfig):
+    from lumisafe.adapters import lumibot_bridge as bridge
     from lumisafe.advisor.advisor import AIAdvisor, AnthropicLLMClient
+
+    bridge.load_dotenv_file(".env")  # ANTHROPIC_API_KEY may live in .env; a standalone `today` must see it
 
     return AIAdvisor(AnthropicLLMClient() if config.ai_enabled else None, enabled=config.ai_enabled)
 
