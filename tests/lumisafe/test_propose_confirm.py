@@ -151,3 +151,26 @@ def test_propose_without_a_cycle_says_queued(monkeypatch, world):
     monkeypatch.setattr(cli, "paper_runner", lambda config, run_once=True: None)
     res = run("propose", "BUY", "AAPL", "1")
     assert "Queued" in res.output
+
+
+def test_advisor_veto_stops_a_user_trade_and_outage_only_warns(world, monkeypatch):
+    from lumisafe.advisor.advisor import AIAdvisor
+
+    from .test_advisor import VETO, FakeLLM
+
+    def runner_with(llm):
+        def run(config, run_once=True):
+            world.ex.now = world.now
+            engine = assemble_engine(config, Journal(), StateStore(paths.state_path()), mode="paper",
+                                     history_fn=history, advisor=AIAdvisor(llm, True))
+            engine.cycle(world.ex)
+        return run
+
+    monkeypatch.setattr(cli, "paper_runner", runner_with(FakeLLM(VETO)))
+    out = run("propose", "BUY", "AAPL", "1").output
+    assert "advisor  VETO" in out and "Result: VETO" in out
+    monkeypatch.setattr(cli, "paper_runner", runner_with(FakeLLM(error=OSError("down"))))
+    out = run("propose", "BUY", "AAPL", "1").output
+    assert "advisor  WARN" in out and "Result: APPROVE" in out
+    reviewers = [r.reviewer for r in user_entries()[-1].reviews]
+    assert reviewers == ["coach", "tax", "advisor", "risk"]  # SPEC §4 order

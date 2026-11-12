@@ -38,7 +38,7 @@ def test_paper_cycle_places_and_journals_core_dca_order(_isolated_lumisafe_home)
 
     bridge.load_dotenv_file(".env")
     cfg = LumiSafeConfig.model_validate({**BALANCED, "core": {**BALANCED["core"], "monthly_contribution_usd": 50},
-                                         "ai_enabled": False})
+                                         "ai_enabled": True})
     run_paper_cycle(cfg)
     j = Journal(paths.journal_path())
     entries = j.query(source=Source.CORE)
@@ -46,6 +46,18 @@ def test_paper_cycle_places_and_journals_core_dca_order(_isolated_lumisafe_home)
     submitted = [e for e in entries if e.final in (Verdict.APPROVE, Verdict.RESIZE)]
     assert submitted, f"no core DCA order was submitted: {[r.explanation for e in entries for r in e.reviews]}"
     assert j.events("paper_cycle")[-1].payload["mode"] == "paper"
+
+    # Phase 7: the daily note is generated in paper mode (Claude if credentials resolve, else the offline note).
+    from click.testing import CliRunner
+
+    from lumisafe.config.schema import save_config
+    from lumisafe.reporting import cli
+
+    save_config(cfg, paths.config_path())
+    res = CliRunner().invoke(cli.main, ["today"])
+    assert res.exit_code == 0, res.output
+    source = "offline fallback" if "Nothing to do today unless your goals changed." in res.output else "Claude"
+    print(f"\nDAILY NOTE ({source}):\n{res.output}")
 
 
 def test_balanced_core_10y_tracks_blended_benchmark_within_1_5_points():

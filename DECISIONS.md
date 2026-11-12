@@ -229,3 +229,26 @@ Every assumption, deviation and ambiguity resolution made while implementing
 - Each active strategy gets a ledger (cash + positions) seeded once with `max_weight × account equity`, split across active strategies. Fills update the ledger. Satellite equity = ledger cash + market value of ledger positions, which is what R6/R7 and retirement measure. The ledger cash is reserved: the core never invests it.
 - Rebalances are sized to the ledger's value, capped at `max_weight × account equity`, once per month (or ISO week). Orders under $10 are skipped. Satellite intents go through the full pipeline (coach passes them; tax; advisor in Phase 7; RiskGate).
 - `reset-halt satellite` needs the typed phrase `RESET SATELLITE`. It clears the latch, keeps the trigger history (it counts toward retirement), and re-bases the satellite peak on the next cycle.
+
+---
+
+## Phase 7 — Advisor (2026-11-12)
+
+### 2026-11-12 — LLM client and model
+- `AnthropicLLMClient` (behind the `LLMClient.complete(system, user, *, json_schema, timeout)` interface; see the Phase 0 decision on not using `self.agents`). Model `claude-opus-5-5` (current default) at `effort: low`: the advisor makes a short approve/veto judgment, not deep analysis. Reviews request structured JSON through `output_config.format` (JSON Schema with `verdict ∈ {approve, veto}`); the advisor still validates with a strict pydantic model (`extra="forbid"`), so a malformed reply can never pass (A3).
+- **No `tools` parameter is ever sent** (A1). The advisor package imports nothing from adapters/runner/risk/config/lumibot (AST test).
+- **Server-side refusal fallback is on** (`betas=["server-side-fallback-2026-07-01"]`, `fallbacks="default"`): if the model declines on a safety classifier, the API retries on a fallback model in the same call. A refusal that survives the fallback raises → "advisor unavailable" (A3). The owner can remove it in `AnthropicLLMClient.complete`.
+- Timeout: the SDK request timeout plus an independent 30 s thread-join guard in `_call_with_timeout`, so a hung client can't stall the pipeline. Satellite → VETO "advisor unavailable"; user → WARN and continue.
+- `ai_enabled: false` → user/satellite intents get APPROVE "AI advisor is turned off" (a user choice, not an outage), and `today` uses the deterministic offline note.
+
+### 2026-11-12 — Context (A4)
+- `AdvisorContext` = trade (side/symbol/qty/source/stated reason), up to 20 recent daily closes, current position shares and account weight, the last 10 journal decisions on that symbol, and optional headlines (none are fetched yet; the field exists for later). No account IDs, keys, cash or broker data. A test sets fake secrets in the environment and asserts none reach any prompt.
+- Every system prompt lives in `advisor/prompts.py`. A test asserts no other lumisafe module contains prompt text.
+
+### 2026-11-12 — Shadow returns (A5)
+- `update_shadow_returns` fills `shadow_return_20d` for VETO **and BLOCK** entries (all held-back trades, not only AI vetoes, so the dashboard can compare advisor vetoes with gate blocks) once 20 trading days have passed: the price change from the first close on/after the decision date to 20 trading days later. Positive means the price rose afterwards (for a vetoed BUY that's a missed gain; for a vetoed SELL, a loss avoided). The journal trigger lets it be written once.
+- It runs after `lumisafe run-paper` and `lumisafe today` (CLI side, so backtests never fetch data for it).
+
+### 2026-11-12 — Wiring and verification
+- Paper engines built by `build_engine` get the advisor; backtests don't (core-only, and A2 means it would never be called).
+- Done criterion "daily note generated in paper mode": the paper integration test now also runs `lumisafe today` after a real Alpaca paper cycle. Its first run produced the offline note because that test's config had `ai_enabled: False` (since set to `True`). A direct `daily_note` call against the real API then produced a Claude-written note from paper-account facts.

@@ -457,8 +457,14 @@ def build_engine(params: dict) -> Engine:
     factory = params.get("engine_factory")
     if factory is not None:
         return factory(config, journal, state, params)
-    return assemble_engine(config, journal, state, mode=params.get("mode") or config.mode,
-                           fractional=params.get("fractional", True))
+    mode = params.get("mode") or config.mode
+    advisor = None
+    if mode == "paper":
+        from lumisafe.advisor.advisor import AIAdvisor, AnthropicLLMClient
+
+        advisor = AIAdvisor(AnthropicLLMClient() if config.ai_enabled else None, enabled=config.ai_enabled)
+    return assemble_engine(config, journal, state, mode=mode, fractional=params.get("fractional", True),
+                           advisor=advisor)
 
 
 def yahoo_closes(symbol: str, as_of: datetime):

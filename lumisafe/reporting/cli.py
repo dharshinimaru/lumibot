@@ -148,6 +148,7 @@ def run_paper(loop):
         click.echo("Config mode must be `paper`.")
         sys.exit(1)
     paper_runner(config, run_once=not loop)
+    run_shadow_job(Journal())
     click.echo("Paper cycle complete. See `lumisafe status` and `lumisafe journal`.")
 
 
@@ -318,6 +319,62 @@ def reset_halt(what):
     store.save()
     Journal().record_event("halt_reset", {"what": "satellite"}, ts=now_utc())
     click.echo("Satellite halt reset.")
+
+
+# --- AI daily note + shadow returns ------------------------------------------------------------------
+
+def advisor_factory(config: LumiSafeConfig):
+    from lumisafe.advisor.advisor import AIAdvisor, AnthropicLLMClient
+
+    return AIAdvisor(AnthropicLLMClient() if config.ai_enabled else None, enabled=config.ai_enabled)
+
+
+def _closes(symbol: str):
+    hist = history_provider([symbol], None, None)
+    df = hist.get(symbol)
+    return None if df is None else df["close"]
+
+
+def run_shadow_job(journal: Journal) -> int:
+    from lumisafe.advisor.advisor import update_shadow_returns
+
+    try:
+        return update_shadow_returns(journal, _closes, now_utc())
+    except Exception:
+        return 0
+
+
+@main.command()
+def today():
+    """A plain-English note about your portfolio today (AI, with an offline fallback)."""
+    from lumisafe.types import PortfolioSnapshot
+
+    config = _load_config_or_exit()
+    journal = Journal()
+    snap_d = _state().get("last_snapshot")
+    if not snap_d:
+        click.echo("No paper cycle has run yet. Run `lumisafe run-paper` first.")
+        sys.exit(1)
+    as_of = datetime.fromisoformat(snap_d["as_of"])
+    snap = PortfolioSnapshot(as_of=as_of, cash=snap_d["cash"], equity=snap_d["equity"],
+                             positions=snap_d.get("positions", {}), prices=snap_d.get("prices", {}),
+                             peak_equity=snap_d["equity"], satellite_equity=0.0, satellite_peak_equity=0.0,
+                             satellite_day_start_equity=0.0, trades_this_week=0)
+    comparison = None
+    equity = bm.equity_from_journal(journal, mode="paper")
+    if len(equity) >= 2:
+        try:
+            prices = history_provider([config.benchmark], equity.index[0] - timedelta(days=7), None)
+            cmp = bm.compare(equity, prices[config.benchmark]["close"], config.benchmark)
+            comparison = cmp.headline() if cmp else None
+        except Exception:
+            comparison = None
+    updated = run_shadow_job(journal)
+    note = advisor_factory(config).daily_note(snap, journal.query(limit=10), comparison)
+    click.echo(note)
+    if updated:
+        click.echo(f"\n(Updated the 20-day outcome for {updated} held-back trade(s); see `lumisafe journal --rejected`.)")
+    click.echo("\n" + DISCLAIMER)
 
 
 # --- live gate (human only) -------------------------------------------------------------------------
