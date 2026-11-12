@@ -312,7 +312,10 @@ class Engine:
             self.journal.record_event("alert", {"message": a}, ts=now)
         self.state.set("kill_switch", self.kill_switch.to_dict())
         self.journal.record_event(
-            PAPER_CYCLE_EVENT, {"mode": self.mode, "satellite_enabled": bool(self.config.satellite.enabled)}, ts=now
+            PAPER_CYCLE_EVENT,
+            {"mode": self.mode, "satellite_enabled": bool(self.config.satellite.enabled),
+             "equity": acct.equity, "cash": acct.cash},
+            ts=now,
         )
 
         reserve = self.satellite.cash_reserve(acct) if self.satellite is not None else 0.0
@@ -326,6 +329,10 @@ class Engine:
 
         outcomes = self.process(intents, snap, executor)
         self.state.set("lots", self.lots.to_list())
+        self.state.set("last_snapshot", {
+            "as_of": now.isoformat(), "cash": acct.cash, "equity": acct.equity,
+            "positions": acct.positions, "prices": acct.prices, "mode": self.mode,
+        })
         self.state.save()
         return CycleReport(now, outcomes, alerts, plan.notes)
 
@@ -398,14 +405,19 @@ def run_core_backtest(config: LumiSafeConfig, start: datetime, end: datetime, bu
     out_dir = Path(out_dir or tempfile.mkdtemp(prefix="core_bt_", dir=paths.reports_dir()))
     journal_path = out_dir / "backtest_journal.db"
     params = strategy_parameters(config, journal_path=journal_path, state_path=None, mode="backtest")
-    output = bridge.run_backtest(get_strategy_class(), params, start, end, budget, config.benchmark, out_dir)
+    output = bridge.run_backtest(get_strategy_class(), params, start, end, budget, config.benchmark, out_dir,
+                                 symbols=sorted(config.core.etfs))
     return CoreBacktestResult(output, journal_path, out_dir)
 
 
-def run_paper_cycle(config: LumiSafeConfig, engine_factory=None) -> Any:
-    """One paper cycle against Alpaca PAPER, journaling to ~/.lumisafe/journal.db."""
+def run_paper_cycle(config: LumiSafeConfig, engine_factory=None, run_once: bool = True) -> Any:
+    """Paper trading against Alpaca PAPER, journaling to ~/.lumisafe/journal.db.
+
+    ``run_once=True`` runs a single cycle and exits (cron-friendly); otherwise
+    Lumibot's live loop keeps running daily cycles until interrupted.
+    """
     if config.mode != "paper":
         raise ValueError("run_paper_cycle requires mode: paper")
     params = strategy_parameters(config, journal_path=paths.journal_path(), state_path=paths.state_path(),
                                  mode="paper", engine_factory=engine_factory)
-    return bridge.run_paper_once(get_strategy_class(), params)
+    return bridge.run_paper(get_strategy_class(), params, run_once=run_once)

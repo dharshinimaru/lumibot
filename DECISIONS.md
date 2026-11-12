@@ -142,3 +142,34 @@ Every assumption, deviation and ambiguity resolution made while implementing
 - Backtests: fills arrive via `on_filled_order`. Paper: fills may arrive after the run-once process exits, so pending order IDs live in `~/.lumisafe/state.json` and are reconciled through `get_order()` on the next cycle. Canceled/expired orders are dropped and journaled as an `order_not_filled` event.
 - `trades_this_week` (R5) counts submitted **satellite + user** trades since Monday 00:00 (account time zone). Core trades are exempt from R5, so they don't use up the user's weekly allowance either.
 - The `paper_cycle` heartbeat is written on every cycle with the actual mode. Backtest journals live in their own file under `~/.lumisafe/reports/`, never in the paper journal.
+
+---
+
+## Phase 4 — Onboarding + reporting (2026-11-12)
+
+### 2026-11-12 — Backtests trade on dividend-adjusted Yahoo bars via PandasDataBacktesting
+- **What:** the first 10-year Balanced backtest trailed its blended benchmark by **2.22 pts/yr**, outside §15's 1.5. Diagnosis: cash stayed ~0% of equity and there were no monthly reinvestment buys, so Lumibot 4.6.54's `YahooDataBacktesting` (default `auto_adjust=False`) prices raw closes **and credits no dividend cash**. The ~2%/yr gap equals the portfolio's dividend yield.
+- Tried `auto_adjust=True`: Lumibot's `YahooHelper.get_symbol_data(auto_adjust=True)` keeps only `Close` (Open/High/Low dropped), so the backtester got no prices and placed **zero** orders. Second Lumibot bug, not fixed here.
+- **Decision:** `bridge._adjusted_ohlcv()` takes Yahoo's raw OHLC and scales it by Yahoo's own `Adj Close / Close` factor (standard total-return adjustment of real data). The bridge backtests through Lumibot's `PandasDataBacktesting` with those bars. No bars are synthesized or forward-filled; missing days stay missing (Lumibot RULE #1). Result: core CAGR 10.74% vs monthly-rebalanced blend 10.44% → **+0.29 pts/yr**. The §15 test asserts `|gap| <= 1.5` unchanged.
+- **Alternatives:** credit dividends inside the LumiSafe strategy (duplicates broker logic and risks double counting if Lumibot ever starts paying them), or loosen the tolerance (forbidden).
+- Both Lumibot issues (Yahoo backtest pays no dividends with raw closes; `auto_adjust=True` drops OHLC) plus the `get_symbols_data` recursion are worth reporting upstream. `lumibot/` is untouched.
+
+### 2026-11-12 — Quiz
+- 7 questions (≤ 8): the six from §6 plus "invest your whole current balance now?" (yes → `monthly_contribution_usd: 0`, lump-sum mode; see Phase 3).
+- Q3 is asked as a choice: sell at $900 / $800 / $700 / $600-or-hold → loss tolerance 10/20/30/40%.
+- Scoring: horizon < 3 years or goal "save in < 3 years" → Conservative, satellite 0 (§6). Otherwise Growth if tolerance ≥ 30% and horizon ≥ 10, Balanced if tolerance ≥ 20% and horizon ≥ 5, else Conservative. These thresholds are my judgment; §6 gives the profiles but not the cut-offs.
+- No emergency fund → the plan recommends building one first; paper mode is still allowed (§6).
+- The satellite is enabled only if the user wants to experiment AND the profile allows > 0%.
+
+### 2026-11-12 — Satellite `allowed_states` in paper mode
+- The `SatelliteConfig` default is `["LIVE_ELIGIBLE"]`. But a strategy can only reach LIVE_ELIGIBLE after 60 trading days in PAPER (§8), so with the default, nothing could ever be paper-tested. Onboarding writes `allowed_states: ["PAPER", "LIVE_ELIGIBLE"]` for paper mode. P1 still holds: DRAFT/BACKTESTED/REJECTED/RETIRED never run. Live mode is restricted to LIVE_ELIGIBLE by `LiveAuthorization`.
+
+### 2026-11-12 — Status / benchmark
+- The headline is exactly "Your return: X% · If you'd just held SPY: Y%". X = equity change between the first and latest paper heartbeat; Y = buy-and-hold of the benchmark over the same dates with the same starting money. A simple (not time-weighted) return is fine because Alpaca paper accounts can't take deposits. Revisit if live deposits ever exist.
+- Heartbeat payload now also carries `equity` and `cash`. `live_unlock` only reads `mode`/`satellite_enabled`, so the frozen file is unaffected. The engine also saves a `last_snapshot` (positions/prices/equity) to `state.json`, so `status` works offline. If benchmark data can't be fetched, status says the comparison is unavailable instead of failing.
+- No win-rate metric anywhere (a test greps for it).
+
+### 2026-11-12 — CLI additions and safety
+- Added `lumisafe run-paper [--loop]` (not in §9's list): there must be a command that actually runs the plan on Alpaca paper. Default is one cycle (cron-friendly); `--loop` runs Lumibot's daily loop.
+- `lumisafe go-live` only runs `live_unlock.unlock()` and reports the result; it never connects a live broker (Phase 3 decision). Per §3 rule 2 the agent never runs it, and tests only assert that the command exists.
+- Integration tests are opt-in: `tests/lumisafe/conftest.py` skips `integration`-marked tests unless `-m` mentions `integration`. A plain `pytest` run had executed them and placed a second ~$50 **paper** order. Paper only, but unintended, so it can't happen again.

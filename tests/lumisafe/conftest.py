@@ -18,6 +18,16 @@ def pytest_configure(config):
     )
 
 
+def pytest_collection_modifyitems(config, items):
+    """Integration tests are opt-in: they only run when ``-m`` mentions ``integration``."""
+    if "integration" in (config.option.markexpr or ""):
+        return
+    skip = pytest.mark.skip(reason="integration test: run with -m integration")
+    for item in items:
+        if item.get_closest_marker("integration"):
+            item.add_marker(skip)
+
+
 @pytest.fixture(autouse=True)
 def _isolated_lumisafe_home(tmp_path, monkeypatch):
     home = tmp_path / "lumisafe_home"

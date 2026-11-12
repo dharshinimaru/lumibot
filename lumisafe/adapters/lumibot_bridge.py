@@ -142,24 +142,47 @@ def order_fill(strategy: Any, identifier: str) -> tuple[str, float | None, float
 # --- historical data (Yahoo through Lumibot) ---------------------------------------------
 
 
+def _adjusted_ohlcv(symbol: str) -> pd.DataFrame | None:
+    """Real Yahoo daily bars, dividend/split adjusted (total return), with full OHLC.
+
+    Lumibot 4.6.54's ``auto_adjust=True`` keeps only Close, so we take the raw
+    bars and scale Open/High/Low/Close by Yahoo's own ``Adj Close / Close``
+    factor. This is the standard total-return adjustment of real data. Nothing
+    is synthesized, and days Yahoo doesn't have stay missing (RULE #1).
+    """
+    from lumibot.tools import YahooHelper
+
+    raw = YahooHelper.get_symbol_data(symbol, interval="1d", caching=True, auto_adjust=False)
+    if raw is None or raw.empty:
+        return None
+    raw = raw.rename(columns=str.lower)
+    if not {"open", "high", "low", "close", "adj close"} <= set(raw.columns):
+        return None
+    raw = raw.dropna(subset=["open", "high", "low", "close", "adj close"])
+    raw = raw[(raw["close"] > 0) & (raw["adj close"] > 0)]
+    factor = raw["adj close"] / raw["close"]
+    df = pd.DataFrame({
+        "open": raw["open"] * factor, "high": raw["high"] * factor, "low": raw["low"] * factor,
+        "close": raw["adj close"], "volume": raw.get("volume", 0),
+    }, index=raw.index)
+    return df
+
+
 def fetch_daily_history(symbols: list[str], start: datetime | None = None,
                         end: datetime | None = None) -> dict[str, pd.DataFrame]:
-    """Split/dividend-adjusted daily OHLCV per symbol from Yahoo via Lumibot's helper.
+    """Dividend/split-adjusted daily OHLCV per symbol (Yahoo via Lumibot), naive NY-date index.
 
     Uses the per-symbol ``get_symbol_data``. Lumibot 4.6.54's
     ``YahooHelper.get_symbols_data`` is defined twice and the second definition
     calls itself (infinite recursion). See DECISIONS.md.
     """
-    from lumibot.tools import YahooHelper
-
     out: dict[str, pd.DataFrame] = {}
     for sym in symbols:
-        df = YahooHelper.get_symbol_data(sym, interval="1d", caching=True, auto_adjust=True)
+        df = _adjusted_ohlcv(sym)
         if df is None or df.empty:
             continue
         df = df.copy()
-        df.columns = [str(c).lower() for c in df.columns]
-        idx = pd.to_datetime(df.index)
+        idx = pd.DatetimeIndex(df.index)
         if idx.tz is not None:
             idx = idx.tz_convert("America/New_York").tz_localize(None)
         df.index = idx.normalize()
@@ -186,16 +209,39 @@ class BacktestOutput:
     stats_dir: Path
 
 
-def run_backtest(strategy_cls: type, parameters: dict, start: datetime, end: datetime, budget: float,
-                 benchmark: str, out_dir: Path, cost_fraction: float = 0.001) -> BacktestOutput:
-    """Run a Lumibot Yahoo backtest of ``strategy_cls``.
+def _pandas_data(symbols: list[str], start: datetime, end: datetime) -> dict:
+    from lumibot.entities import Asset, Data
 
-    ``cost_fraction`` is charged as a percent fee on both buys and sells. The
-    default 0.001 is 5 bps commission plus 0.05% slippage (SPEC §8). Lumibot's
-    ``TradingSlippage`` is an absolute price amount, so percentage slippage is
-    folded into the fee.
+    data = {}
+    lo = _naive(start) - pd.Timedelta(days=400)  # warm-up history for indicators
+    hi = _naive(end) + pd.Timedelta(days=7)
+    for sym in symbols:
+        df = _adjusted_ohlcv(sym)
+        if df is None or df.empty:
+            raise ValueError(f"No Yahoo data for {sym}")
+        idx = pd.DatetimeIndex(df.index)
+        naive = idx.tz_convert("America/New_York").tz_localize(None) if idx.tz is not None else idx
+        df = df[(naive >= lo) & (naive <= hi)]
+        asset = Asset(sym, asset_type="stock")
+        data[asset] = Data(asset, df, timestep="day")
+    return data
+
+
+def run_backtest(strategy_cls: type, parameters: dict, start: datetime, end: datetime, budget: float,
+                 benchmark: str, out_dir: Path, symbols: list[str], cost_fraction: float = 0.001) -> BacktestOutput:
+    """Backtest ``strategy_cls`` with Lumibot's PandasDataBacktesting on adjusted Yahoo bars.
+
+    * Data: real Yahoo daily bars, dividend-adjusted (see ``_adjusted_ohlcv``).
+      Lumibot's own Yahoo backtest prices raw closes and credits no dividend
+      cash in 4.6.54, which silently drops ~2%/yr for an ETF portfolio
+      (DECISIONS.md, Phase 4). ``symbols`` must list every symbol the strategy
+      can trade.
+    * Costs: ``cost_fraction`` is charged as a percent fee on buys and sells.
+      The default 0.001 is 5 bps commission plus 0.05% slippage (SPEC §8).
+      Lumibot's ``TradingSlippage`` is an absolute price amount, so
+      percentage slippage is folded into the fee.
     """
-    from lumibot.backtesting import YahooDataBacktesting
+    from lumibot.backtesting import PandasDataBacktesting
     from lumibot.entities import TradingFee
 
     out_dir = Path(out_dir)
@@ -205,41 +251,38 @@ def run_backtest(strategy_cls: type, parameters: dict, start: datetime, end: dat
     previous = os.environ.get("IS_BACKTESTING")
     os.environ["IS_BACKTESTING"] = "true"  # never touch a broker during a backtest
     try:
-        results, strat = _run(strategy_cls, YahooDataBacktesting, start, end, budget, benchmark, parameters, fee,
-                              out_dir)
+        pandas_data = _pandas_data(sorted(set(symbols) | {benchmark}), start, end)
+        results, strat = strategy_cls.run_backtest(
+            PandasDataBacktesting,
+            start,
+            end,
+            pandas_data=pandas_data,
+            budget=budget,
+            benchmark_asset=benchmark,
+            parameters=parameters,
+            buy_trading_fees=[fee],
+            sell_trading_fees=[fee],
+            show_plot=False,
+            show_tearsheet=False,
+            save_tearsheet=False,
+            show_indicators=False,
+            show_progress_bar=False,
+            save_stats_file=True,
+            stats_file=str(out_dir / "stats.csv"),
+            plot_file_html=str(out_dir / "plot.html"),
+            trades_file=str(out_dir / "trades.csv"),
+            settings_file=str(out_dir / "settings.json"),
+            tearsheet_file=str(out_dir / "tearsheet.html"),
+            indicators_file=str(out_dir / "indicators.html"),
+            logfile=str(out_dir / "log.txt"),
+            quiet_logs=True,
+        )
     finally:
         if previous is None:
             os.environ.pop("IS_BACKTESTING", None)
         else:
             os.environ["IS_BACKTESTING"] = previous
     return BacktestOutput(results=results, strategy=strat, stats_dir=out_dir)
-
-
-def _run(strategy_cls, datasource, start, end, budget, benchmark, parameters, fee, out_dir):
-    return strategy_cls.run_backtest(
-        datasource,
-        start,
-        end,
-        budget=budget,
-        benchmark_asset=benchmark,
-        parameters=parameters,
-        buy_trading_fees=[fee],
-        sell_trading_fees=[fee],
-        show_plot=False,
-        show_tearsheet=False,
-        save_tearsheet=False,
-        show_indicators=False,
-        show_progress_bar=False,
-        save_stats_file=True,
-        stats_file=str(out_dir / "stats.csv"),
-        plot_file_html=str(out_dir / "plot.html"),
-        trades_file=str(out_dir / "trades.csv"),
-        settings_file=str(out_dir / "settings.json"),
-        tearsheet_file=str(out_dir / "tearsheet.html"),
-        indicators_file=str(out_dir / "indicators.html"),
-        logfile=str(out_dir / "log.txt"),
-        quiet_logs=True,
-    )
 
 
 # --- paper trading -------------------------------------------------------------------
@@ -278,13 +321,13 @@ def make_paper_broker():
     return broker
 
 
-def run_paper_once(strategy_cls: type, parameters: dict, name: str = "LumiSafe") -> Any:
-    """Run exactly one trading iteration of ``strategy_cls`` against Alpaca PAPER."""
+def run_paper(strategy_cls: type, parameters: dict, run_once: bool = True, name: str = "LumiSafe") -> Any:
+    """Run ``strategy_cls`` against Alpaca PAPER: one iteration, or Lumibot's live loop."""
     from lumibot.traders import Trader
 
     broker = make_paper_broker()
     strategy = strategy_cls(broker=broker, parameters=parameters, name=name)
     trader = Trader(logfile="", backtest=False, quiet_logs=True)
     trader.add_strategy(strategy)
-    trader.run_all(run_once=True, show_plot=False, show_tearsheet=False, save_tearsheet=False)
+    trader.run_all(run_once=run_once, show_plot=False, show_tearsheet=False, save_tearsheet=False)
     return strategy

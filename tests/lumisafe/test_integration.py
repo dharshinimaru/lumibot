@@ -46,3 +46,20 @@ def test_paper_cycle_places_and_journals_core_dca_order(_isolated_lumisafe_home)
     submitted = [e for e in entries if e.final in (Verdict.APPROVE, Verdict.RESIZE)]
     assert submitted, f"no core DCA order was submitted: {[r.explanation for e in entries for r in e.reviews]}"
     assert j.events("paper_cycle")[-1].payload["mode"] == "paper"
+
+
+def test_balanced_core_10y_tracks_blended_benchmark_within_1_5_points():
+    """SPEC §15: last-10-year Balanced core backtest tracks its blended benchmark within 1.5 pts/yr."""
+    from lumisafe.adapters import lumibot_bridge as bridge
+    from lumisafe.reporting import benchmark as bm
+    from lumisafe.runner import run_core_backtest
+
+    cfg = LumiSafeConfig.model_validate(BALANCED)
+    start, end = datetime(2015, 11, 1), datetime(2025, 11, 1)
+    r = run_core_backtest(cfg, start, end)
+    equity = bm.equity_from_journal(Journal(r.journal_path), mode="backtest")
+    hist = bridge.fetch_daily_history(list(cfg.core.etfs), start, end)
+    blend = bm.blended_benchmark({s: hist[s]["close"] for s in cfg.core.etfs}, cfg.core.etfs)
+    gap = bm.tracking_gap_per_year(equity, blend)
+    print(f"core CAGR {bm.cagr(equity):.2%} vs blend {bm.cagr(blend):.2%} → gap {gap:+.2%}/yr")
+    assert abs(gap) <= 0.015

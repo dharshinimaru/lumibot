@@ -52,7 +52,8 @@ def test_first_cycle_invests_monthly_contribution_and_journals(setup):
     assert len(entries) == len(report.outcomes) and all(e.fill_qty for e in entries)
     assert {l.symbol for l in engine.lots.lots} == {o.entry.intent.symbol for o in report.outcomes}
     beats = journal.events(PAPER_CYCLE_EVENT)
-    assert beats[-1].payload == {"mode": "paper", "satellite_enabled": False}
+    assert beats[-1].payload == {"mode": "paper", "satellite_enabled": False, "equity": 10_000, "cash": 10_000}
+    assert state.get("last_snapshot")["equity"] == 10_000
     assert state.path.is_file()
 
 
