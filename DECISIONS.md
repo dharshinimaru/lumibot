@@ -53,3 +53,31 @@ Every assumption, deviation and ambiguity resolution made while implementing
 ### 2026-11-12 — CLI entry point
 - **What:** §9 shows a `lumisafe` command. Adding a console script would mean editing Lumibot's `setup.py`, which is Lumibot packaging.
 - **Decision:** ship `python -m lumisafe ...` (`lumisafe/__main__.py`). README tells users to `alias lumisafe="python -m lumisafe"`.
+
+---
+
+## Phase 1 — Contracts (2026-11-12)
+
+### 2026-11-12 — Config strictness beyond the contract
+- `weights_sum` raises `ValueError` instead of using `assert`, which `python -O` would strip. It also rejects an empty or negative-weight core. Same contract, stronger.
+- All config models use `extra="forbid"` and `validate_assignment=True`. So `cfg.risk.allow_leverage = True` and `cfg.mode = "live"` raise after construction, and unknown keys such as `allow_margin` are rejected rather than silently ignored. C1/C2 then hold for the object's whole lifetime, not just at construction.
+
+### 2026-11-12 — Default ETF cap vs core weights
+- **What:** §6 profiles hold up to 70% VTI in the core, but the `max_single_etf_weight` default is 0.60. With the defaults, R2 would resize every Growth-profile VTI purchase.
+- **Decision:** the `RiskConfig` default stays 0.60 per contract. The plan generator (Phase 4) and `config/defaults.yaml` set `max_single_etf_weight = min(1.0, max(0.60, largest core weight + rebalance_band))`, which is 0.65 for Balanced and 0.75 for Growth, and is within the field's `le=1.0` bound.
+- **Alternatives:** exempt core trades from R2. Rejected: §5.3 has no such exemption, and the cap remains a useful backstop against a corrupted target weight.
+
+### 2026-11-12 — Journal storage details
+- Aware datetimes are stored as UTC ISO strings so text ordering equals time ordering in range filters. LumiSafe uses tz-aware datetimes throughout.
+- `intent_id` is `UNIQUE`, which enforces the "at most one" half of J2 in storage. The runner enforces the "at least one" half (tested in Phase 3).
+- Triggers: DELETE is forbidden; UPDATE of any intent/review/verdict column is forbidden; `fill_price`/`fill_qty` and `shadow_return_20d` can go NULL→value once and never change again.
+- **Added an append-only `events` table** (same DB, same triggers) for facts that are not order intents: promotion transitions (§8 "every transition is journaled"), halts, alerts, and per-cycle `paper_cycle` heartbeats. `JournalEntry` requires an `OrderIntent`, so these facts can't be entries without inventing fake intents.
+- `query(**filters)` supports: symbol, source, side, final (single or list), intent_id, entry_id, since, until, rejected, submitted, limit. Unknown filters raise `TypeError`.
+
+### 2026-11-12 — Live gate (`live_unlock.py`) interpretation
+- **Condition 1:** `stdin.isatty()`; any exception counts as "not a TTY" (fail closed). The phrase prompt only runs on a TTY, so it can't be piped in.
+- **Condition 2:** exact match after stripping only the trailing newline. Case and punctuation must match.
+- **Condition 3:** `LUMISAFE_LIVE` must equal exactly `"1"` AND must not appear in the `.env` file (default: `./.env`). A dotenv loader such as Lumibot's could otherwise inject it, and §10 says "set by the human in their shell (not in .env)". An unreadable `.env` counts as "defined" (fail closed).
+- **Condition 4:** a calendar month strictly before the current one where: `paper_cycle` heartbeats with `mode == "paper"` fall on ≥15 distinct days, the first by day 7 and the last on day 22 or later (covers the month end to end); every heartbeat had `satellite_enabled == False`; ≥1 CORE entry was submitted and filled; and zero SATELLITE entries were submitted. The thresholds are module constants. Backtest heartbeats never count.
+- `LiveAuthorization` can only be built with a private mint key, so constructing it directly raises `PermissionError`. `is_authorized()` checks the key. It carries `allowed_sources = (core, satellite)` and `allowed_satellite_states = (LIVE_ELIGIBLE,)` from §10's "only CORE plus LIVE_ELIGIBLE satellites", so USER intents are not live-eligible. The runner must enforce these.
+- Per §3 rule 2 this file is now frozen for the agent. Later phases only import from it.

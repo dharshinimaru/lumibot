@@ -1,0 +1,27 @@
+# LumiSafe beginner defaults (SPEC §5.1, §6 "Balanced" profile).
+# `lumisafe init` writes your own copy to ~/.lumisafe/config.yaml.
+mode: paper
+core:
+  etfs:
+    VTI: 0.60
+    VXUS: 0.20
+    BND: 0.20
+  monthly_contribution_usd: 200
+  rebalance_band: 0.05
+  rebalance_check: monthly
+satellite:
+  enabled: false
+  max_weight: 0.05
+  allowed_states: [LIVE_ELIGIBLE]
+risk:
+  max_single_stock_weight: 0.05
+  # Largest core weight (0.60) + rebalance band (0.05), so normal core drift
+  # never trips R2. See DECISIONS.md (Phase 1).
+  max_single_etf_weight: 0.65
+  max_trades_per_week: 5
+  satellite_daily_loss_halt: 0.03
+  satellite_drawdown_halt: 0.15
+  account_drawdown_alert: 0.25
+  min_holding_days: 5
+benchmark: SPY
+ai_enabled: true
