@@ -81,3 +81,29 @@ Every assumption, deviation and ambiguity resolution made while implementing
 - **Condition 4:** a calendar month strictly before the current one where: `paper_cycle` heartbeats with `mode == "paper"` fall on ≥15 distinct days, the first by day 7 and the last on day 22 or later (covers the month end to end); every heartbeat had `satellite_enabled == False`; ≥1 CORE entry was submitted and filled; and zero SATELLITE entries were submitted. The thresholds are module constants. Backtest heartbeats never count.
 - `LiveAuthorization` can only be built with a private mint key, so constructing it directly raises `PermissionError`. `is_authorized()` checks the key. It carries `allowed_sources = (core, satellite)` and `allowed_satellite_states = (LIVE_ELIGIBLE,)` from §10's "only CORE plus LIVE_ELIGIBLE satellites", so USER intents are not live-eligible. The runner must enforce these.
 - Per §3 rule 2 this file is now frozen for the agent. Later phases only import from it.
+
+---
+
+## Phase 2 — Risk (2026-11-12)
+
+### 2026-11-12 — ETF vs single stock classification
+- **What:** R1 (stock cap 5%) and R2 (ETF cap 60%) need to know whether a symbol is an ETF. The snapshot doesn't carry asset types, and asking the broker would make the gate impure.
+- **Decision:** `limits.KNOWN_ETFS` is a fixed list of common diversified US ETFs, and core symbols always count as ETFs. **Any unknown symbol is treated as a single stock**, so it gets the stricter cap. Misclassification can only make the gate stricter, never looser.
+- **Alternatives:** an asset-type lookup through the bridge passed in via the snapshot (needs a contract change), or treating unknowns as ETFs (unsafe).
+
+### 2026-11-12 — Rule order and scope details
+- Order inside `check()`: C1 defense (forged config flags → BLOCK) → R11 validation → R7/R6 (satellite, both sides) → SELL: R4, R8 (core symbols, any source), R9 → BUY: R8 (satellite/user), R5, R1/R2 resize, R3.
+- **R3 vs resize:** R3 says BLOCK, so an unaffordable order (after any R1/R2 resize) is blocked, not shrunk to fit the cash. The core strategy sizes its own buys to available cash.
+- **R6/R7** block all satellite intents, buys and sells. That follows §5.3 literally, even though it means a halted satellite can't exit. Exiting is not a beginner-protecting action the spec asks for; a human can reset.
+- **R8** blocks SELLs of core symbols from every source, including CORE rebalancing ("core holdings are never sold by the gate").
+- **R9** counts weekdays with `numpy.busday_count`, ignoring exchange holidays, so the gate stays deterministic with no calendar I/O. Lots must be aged for a SELL to pass. Holdings not covered by any tracked lot (bought before LumiSafe ran) count as aged, since LumiSafe can only know lots it recorded.
+- **Whole vs fractional:** if the intent quantity is a whole number, resizes stay whole; otherwise resizes are in 1e-6 steps.
+- **Float exactness:** the cap search verifies with the same expression the invariant is written in, `(held + q) * price / equity <= cap`. Hypothesis found a case where checking `(held+q)*price <= cap*equity` instead let 0.05000000000000001 through.
+
+### 2026-11-12 — R7 "until manual reset" with a pure gate
+- **What:** the gate is pure and the snapshot has no "halt latched" field, so on its own the gate would un-halt the satellite once it recovered above the threshold.
+- **Decision:** `risk/kill_switch.py` `KillSwitch` latches R7 (persisted in state), counts R7 triggers (for §8 auto-retirement), and raises the R8 alert once per drawdown episode. While latched, the runner (a) doesn't run the SatelliteManager and (b) keeps `satellite_peak_equity` frozen, so the gate also keeps blocking. Reset requires typing `RESET SATELLITE`, after which the runner re-bases the satellite peak to current equity.
+- **Alternatives:** add a `satellite_halted` field to `PortfolioSnapshot` (a contract change needing owner approval).
+
+### 2026-11-12 — Guard test for live_unlock.py
+- Added `test_live_unlock_frozen.py`, which pins the SHA-256 of `live_unlock.py` as committed in Phase 1. The agent can't edit it accidentally without a red test. The owner may update both together.
