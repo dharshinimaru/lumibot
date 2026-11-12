@@ -1,4 +1,4 @@
-<!-- entry-source-sha256: 2d3e5a13d7c9a901e52d9bcd402265128752a427567a93bc0bfad88e795d5905 -->
+<!-- entry-source-sha256: 15415ea6cd94d92e881bb8d161dc7c709dc7d7f7a4a917d0e51898c7a7c9d384 -->
 
 # LumiBot AI Trading
 
@@ -64,6 +64,16 @@ lumibot connect botspot
 ```
 
 [BotSpot MCP → LumiBot](README.md#strategy-botspot-research)
+
+<!-- lumisafe:start -->
+## LumiSafe: 초보자 모드 (요약)
+
+LumiSafe는 LumiBot 위에 만든 선택형 초보자 모드로, `lumisafe/` 패키지에 있습니다. 단순한 인덱스 펀드 계획으로 투자하고, 모든 주문을 고정된 안전 규칙(레버리지·공매도·옵션 금지, 개별 주식 비중과 거래 빈도 상한, 공황 매도나 추격 매수 시 숙려 기간)으로 검사하며, 결과를 항상 "S&P 500을 그냥 보유했다면"과 나란히 보여 줍니다. **페이퍼(모의) 계좌에서만** 거래합니다.
+
+필요한 것: Python 3.10 이상과 무료 Alpaca **페이퍼** 계좌. 복제부터 첫 모의 거래까지의 전체 명령(최대 10개)은 [영문 LumiSafe 빠른 시작](README.md#lumisafe-quickstart)에 있으며, 이후에는 `lumisafe init`, `lumisafe run-paper`, `lumisafe status`만 쓰면 됩니다.
+
+교육용 소프트웨어입니다. 금융·세무·법률 자문이 아닙니다. 투자는 가치가 떨어질 수 있습니다.
+<!-- lumisafe:end -->
 
 ## 프레임워크 살펴보기
 

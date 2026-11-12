@@ -11,8 +11,7 @@ import lumisafe
 
 def test_every_lumisafe_module_imports():
     names = [m.name for m in pkgutil.walk_packages(lumisafe.__path__, prefix="lumisafe.")]
-    # dashboard is a Streamlit script; it is imported in its own test once it exists.
-    names = [n for n in names if n not in {"lumisafe.reporting.dashboard", "lumisafe.__main__"}]
+    names = [n for n in names if n != "lumisafe.__main__"]  # __main__ would run the CLI
     assert "lumisafe.risk.gate" in names
     for name in names:
         importlib.import_module(name)

@@ -1,4 +1,4 @@
-<!-- entry-source-sha256: 2d3e5a13d7c9a901e52d9bcd402265128752a427567a93bc0bfad88e795d5905 -->
+<!-- entry-source-sha256: 15415ea6cd94d92e881bb8d161dc7c709dc7d7f7a4a917d0e51898c7a7c9d384 -->
 
 # LumiBot AI Trading
 
@@ -64,6 +64,16 @@ lumibot connect botspot
 ```
 
 [BotSpot MCP → LumiBot](README.md#strategy-botspot-research)
+
+<!-- lumisafe:start -->
+## LumiSafe : mode débutant (résumé)
+
+LumiSafe est un mode débutant optionnel, dans le paquet `lumisafe/` et construit sur LumiBot. Il investit selon un plan simple de fonds indiciels, fait passer chaque ordre par des règles de sécurité fixes (ni effet de levier, ni vente à découvert, ni options ; plafonds par action individuelle et sur la fréquence des transactions ; délai de réflexion face aux ventes de panique et à la course aux hausses) et affiche toujours votre résultat à côté de « si vous aviez simplement conservé le S&P 500 ». Il ne négocie **que sur des comptes paper (simulés)**.
+
+Prérequis : Python 3.10 ou plus récent et un compte **paper** Alpaca gratuit. Les commandes complètes (dix au maximum, du clonage à votre premier ordre simulé) se trouvent dans le [guide de démarrage LumiSafe en anglais](README.md#lumisafe-quickstart) ; ensuite, `lumisafe init`, `lumisafe run-paper` et `lumisafe status` suffisent.
+
+Logiciel éducatif. Ne constitue pas un conseil financier, fiscal ou juridique. Les investissements peuvent perdre de la valeur.
+<!-- lumisafe:end -->
 
 ## Explorer le framework
 

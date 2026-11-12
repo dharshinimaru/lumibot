@@ -1,4 +1,4 @@
-<!-- entry-source-sha256: 2d3e5a13d7c9a901e52d9bcd402265128752a427567a93bc0bfad88e795d5905 -->
+<!-- entry-source-sha256: 15415ea6cd94d92e881bb8d161dc7c709dc7d7f7a4a917d0e51898c7a7c9d384 -->
 
 # LumiBot AI Trading
 
@@ -64,6 +64,16 @@ lumibot connect botspot
 ```
 
 [BotSpot MCP → LumiBot](README.md#strategy-botspot-research)
+
+<!-- lumisafe:start -->
+## LumiSafe: 初心者モード(概要)
+
+LumiSafe は LumiBot 上に構築された任意の初心者モードで、`lumisafe/` パッケージにあります。シンプルなインデックスファンドの計画で投資し、すべての注文を固定の安全ルール(レバレッジ・空売り・オプションは不可、個別株と取引頻度に上限、狼狽売りや高値追いには冷却期間)で確認し、結果を常に「S&P 500 をただ保有していた場合」と並べて表示します。取引は**ペーパー口座のみ**です。
+
+必要なもの: Python 3.10 以上と、Alpaca の無料**ペーパー**口座。クローンから最初のペーパー取引までの全コマンド(10 個以内)は [英語版 LumiSafe クイックスタート](README.md#lumisafe-quickstart) にあります。その後は `lumisafe init`、`lumisafe run-paper`、`lumisafe status` を使います。
+
+教育用ソフトウェアです。金融・税務・法律上の助言ではありません。投資は価値が下がることがあります。
+<!-- lumisafe:end -->
 
 ## フレームワークを調べる
 

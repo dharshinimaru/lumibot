@@ -252,3 +252,23 @@ Every assumption, deviation and ambiguity resolution made while implementing
 ### 2026-11-12 — Wiring and verification
 - Paper engines built by `build_engine` get the advisor; backtests don't (core-only, and A2 means it would never be called).
 - Done criterion "daily note generated in paper mode": the paper integration test now also runs `lumisafe today` after a real Alpaca paper cycle. Its first run produced the offline note because that test's config had `ai_enabled: False` (since set to `True`). A direct `daily_note` call against the real API then produced a Claude-written note from paper-account facts.
+
+---
+
+## Phase 8 — Dashboard + polish (2026-11-12)
+
+### 2026-11-12 — Dashboard
+- `streamlit run lumisafe/reporting/dashboard.py`. `load_data()` (pure reads: journal, state, config, registry, benchmark prices) is separate from `render(st, data)`, so it's testable. A headless Streamlit `AppTest` renders it, and an AST test forbids any write or order call (`submit`, `record`, `save`, `push`, `transition`, …) and any import of `runner`.
+- Panels: headline "Your return: X% · If you'd just held SPY: Y%", equity chart, allocation vs target, halts, strategy states, recent decisions, and "were held-back trades worth holding back?" (average 20-day price move after held-back buys and sells, split AI advisor vs rules). That last one is deliberately an average move, not a "% that helped" figure, so nothing in the UI reads like a win rate. The footer is the disclaimer.
+
+### 2026-11-12 — README and translations
+- `README.md` gets a "LumiSafe quickstart" between the `<!-- lumisafe:start/end -->` markers: **10 commands** from clone to `lumisafe status` (test-enforced ≤ 10). The clone URL is a placeholder, `<your-lumisafe-repo-url>` with `-b lumisafe`, because the work lives on the local `lumisafe` branch and isn't published; public-repo hygiene forbids inventing a private URL.
+- The repo policy (CLAUDE.md / AGENTS.md "entry pages and translations") requires every localized README to be updated in the same commit, and `tests/test_docs_coding_assistant_and_comparisons.py` pins a source fingerprint. I added a short, self-identified **summary** section to each of the 8 localized READMEs (de, es, fr, ja, ko, pt, ru, zh-CN) with the same claims (optional beginner mode, fixed safety rules, compared with holding the S&P 500, paper only, prerequisites, disclaimer), linking to the English quickstart for the commands. I reviewed them before updating the fingerprint. Native-speaker review is still advisable; the fingerprint proves freshness, not translation quality.
+- `docsrc/` (LumiBot's public Sphinx site) and `CHANGELOG.md` are unchanged: LumiSafe isn't part of a LumiBot release, and editing `docsrc/index.rst` would also change the entry fingerprint. Engineering notes are in `docs/LUMISAFE.md`.
+
+### 2026-11-12 — Text rules (§11)
+- The banned-words test scans every file in `lumisafe/`, `tests/lumisafe/`, `DECISIONS.md`, `docs/LUMISAFE.md`, `requirements_lumisafe.txt`, `reports/lumisafe/`, and the LumiSafe sections of all READMEs (case-insensitive; hyphen/space and straight/curly apostrophe variants). The test assembles its own pattern from fragments so it doesn't contain the words itself. `SPEC.md` is excluded: it is the owner's document and quotes the words in order to ban them.
+- Disclaimer appears in `lumisafe init`, `lumisafe status`, `lumisafe today`, the dashboard footer, the plan text and the README quickstart.
+
+### 2026-11-12 — Coverage
+- Branch coverage (unit tests only): risk 93.5–100%, journal 93.4%, promotion 95.3–100%, live_unlock 94.1%, overall 89.2%. Targets are ≥ 90% / ≥ 75%. CI enforces `--cov-fail-under=75` overall. `adapters/lumibot_bridge.py` is ~37% in unit runs because it talks to Lumibot/Alpaca; the integration tests exercise it.

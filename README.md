@@ -245,6 +245,31 @@ Start with paper trading. When you are ready for live trading, use the same stra
 
 For full setup guides, broker tutorials, AI-agent docs, examples, and deployment notes, use the **[Lumibot documentation](https://lumibot.lumiwealth.com/)**.
 
+<!-- lumisafe:start -->
+## LumiSafe quickstart
+
+LumiSafe is an optional beginner mode, built in the `lumisafe/` package on top of LumiBot. It invests a simple index-fund plan, runs every order through fixed safety rules (no leverage, shorting or options; caps on single stocks and on trading frequency; cooling-off delays on panic sells and chasing), and always shows your result next to "if you'd just held the S&P 500". It trades **paper accounts only**.
+
+You need Python 3.10+ and a free [Alpaca](https://alpaca.markets/) **paper** account. From clone to your first paper trade:
+
+```bash
+git clone -b lumisafe <your-lumisafe-repo-url> lumibot
+cd lumibot
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e . -r requirements_lumisafe.txt
+printf 'ALPACA_API_KEY=your-paper-key\nALPACA_API_SECRET=your-paper-secret\nALPACA_IS_PAPER=true\n' > .env
+alias lumisafe="python -m lumisafe"
+lumisafe init
+lumisafe run-paper
+lumisafe status
+```
+
+`lumisafe init` asks up to seven plain-English questions and writes your plan to `~/.lumisafe/`. Run `lumisafe run-paper` once a day (or `lumisafe run-paper --loop`). Other commands: `lumisafe today` (daily note), `lumisafe journal`, `lumisafe propose BUY AAPL 3`, `lumisafe strategies`, and the read-only dashboard `streamlit run lumisafe/reporting/dashboard.py`. The optional AI advisor uses `ANTHROPIC_API_KEY` from `.env` if present; model calls may cost money. Design and decisions: [docs/LUMISAFE.md](docs/LUMISAFE.md), [SPEC.md](SPEC.md), [DECISIONS.md](DECISIONS.md).
+
+Educational software. Not financial, tax, or legal advice. Investments can lose value.
+<!-- lumisafe:end -->
+
 ## Explore LumiBot
 
 - [Python strategies](https://lumibot.lumiwealth.com/examples.html) and [AI strategies](https://lumibot.lumiwealth.com/agents_examples.html)

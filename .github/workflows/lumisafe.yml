@@ -28,7 +28,7 @@ jobs:
       - run: pip install -e . -r requirements_lumisafe.txt
       - run: >-
           python -m pytest tests/lumisafe -m "not integration" -q
-          --cov=lumisafe --cov-report=term-missing
+          --cov=lumisafe --cov-branch --cov-report=term-missing --cov-fail-under=75
       - name: lumibot/ must be untouched (SPEC §3 rule 1)
         run: |
           git fetch origin dev --depth=1
