@@ -1,0 +1,12 @@
+# LumiSafe (beginner mode) dependencies, on top of requirements.txt (SPEC §12).
+pydantic>=2
+pandas
+numpy
+pyyaml
+click
+streamlit
+anthropic
+# tests
+pytest
+hypothesis
+pytest-cov>=5

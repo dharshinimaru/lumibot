@@ -1,0 +1,35 @@
+# LumiSafe unit tests. Network-free by construction (tests/lumisafe/conftest.py
+# blocks sockets); integration tests (-m integration) need paper keys and run locally.
+name: LumiSafe
+
+on:
+  pull_request:
+    paths:
+      - "lumisafe/**"
+      - "tests/lumisafe/**"
+      - "requirements_lumisafe.txt"
+      - ".github/workflows/lumisafe.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    env:
+      BACKTESTING_DATA_SOURCE: none
+      LUMIBOT_DISABLE_DOTENV: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e . -r requirements_lumisafe.txt
+      - run: >-
+          python -m pytest tests/lumisafe -m "not integration" -q
+          --cov=lumisafe --cov-report=term-missing
+      - name: lumibot/ must be untouched (SPEC §3 rule 1)
+        run: |
+          git fetch origin dev --depth=1
+          test -z "$(git diff --stat origin/dev -- lumibot/)"
