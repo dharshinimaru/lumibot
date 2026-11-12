@@ -201,3 +201,31 @@ Every assumption, deviation and ambiguity resolution made while implementing
 - **T2:** "non-core SELL" means `source != CORE`. Gain counts only T3-selected lots held < 365 calendar days with price > cost. Extra tax = gain × (short-term − long-term placeholder rate), defaults 32% / 15%, configurable in the constructor. The text names the date the lots turn long-term.
 - **T3:** `select_lots` (shared with the engine's lot consumption) picks highest cost first and skips lots younger than `min_holding_days` for non-core sells (R9). Core rebalance sells may use any lot.
 - **T4:** every explanation is clipped to fit and then ends with " Not tax advice." (always ≤ 300 chars).
+
+---
+
+## Phase 6 — Promotion (2026-11-12)
+
+### 2026-11-12 — Walk-forward is vectorized on Lumibot-sourced data (deviation from "using Lumibot backtesting")
+- **What:** §4/§8 say the walk-forward uses Lumibot backtesting.
+- **Decision:** `promotion/walk_forward.py` simulates the sleeve on daily bars with numpy. The bars are the same dividend-adjusted Yahoo data the bridge feeds Lumibot's `PandasDataBacktesting` for the core backtest. Same cost model (5 bps + 0.05% on traded notional).
+- **Why:** parameter selection needs, per evaluation, folds × grid = 8 × 9 = 72 event-driven backtests plus the OOS runs. Through Lumibot that's minutes per `lumisafe backtest` and very slow unit tests. And a strategy-only Lumibot backtest would need a second order path outside `runner.py` (or would mix RiskGate effects into the strategy's own metrics). Look-ahead safety doesn't depend on the engine: the strategy only ever receives `as_of`, trades at that day's close, and earns from the next day; S1 is tested directly and a "scramble the test window" test proves parameter choice uses train data only.
+- **Alternative if the owner wants it:** run the final chosen-parameter OOS windows through Lumibot as a parity check. Not done; noted as a follow-up.
+
+### 2026-11-12 — Walk-forward design
+- Rolling folds: train 4 years, test the next 2, step 2 years; the first train window starts 2006-01-01 (earlier data is warm-up for the 200-day MA / 12-month lookback). Today's data gives **8 folds over 20 years** (≥ 4 folds / ≥ 8 years enforced; fewer raises).
+- Per fold, the grid (lookback 3/6/12 months × top 1/2/3) is ranked by train-window Sharpe; the winner is evaluated on the test window. Combined OOS = concatenated test windows. The benchmark (config `benchmark`, default SPY) is buy-and-hold over the same windows.
+- "Beats or matches benchmark risk-adjusted return (Sharpe) in ≥ 50% of folds" is implemented as test Sharpe ≥ benchmark Sharpe per fold. The field is `folds_matching_benchmark` (deliberately not called a "win rate").
+- **Result (real data, saved to `~/.lumisafe/reports/` and copied to `reports/lumisafe/walk_forward_trend_filter_20261112_172752.json`):** OOS Sharpe 0.59 (SPY 0.84), CAGR +8.0%, max drawdown 30.6% (SPY 33.7%), matched SPY's Sharpe in 3/8 folds (38%) → **REJECTED**. That's the honest outcome; §15 accepts whichever state it earns.
+
+### 2026-11-12 — State machine details
+- Allowed edges: DRAFT→{BACKTESTED, RETIRED}; BACKTESTED→{PAPER, REJECTED, RETIRED}; PAPER→{LIVE_ELIGIBLE, REJECTED, RETIRED}; LIVE_ELIGIBLE→{RETIRED}; REJECTED→{RETIRED}; RETIRED is terminal. Anything else raises `TransitionError`. Every edge is tested, and every non-edge is tested to be refused.
+- Every transition is journaled as an append-only `promotion` event with metrics and reasons (§8).
+- Re-running `lumisafe backtest` on a REJECTED/PAPER/LIVE_ELIGIBLE strategy saves a fresh report but does not change state. There's no way back from REJECTED except a new strategy version.
+- PAPER → LIVE_ELIGIBLE (checked every paper cycle): ≥ 60 distinct trading days of satellite-equity heartbeats since `paper_started_at`, zero intents by that strategy that the RiskGate blocked **or resized** (a resize means it tried to break a limit), paper return ≥ 50% of the backtest OOS CAGR scaled to the paper period, and no submitted order older than 3 days with neither a fill nor an `order_not_filled` event. Once 60 days pass without meeting the bar → REJECTED. LIVE_ELIGIBLE only means a human may enable it; nothing switches to live.
+- Auto-retirement (every cycle, any active state): the strategy's 126-trading-day (~6 months) sleeve return trails the benchmark's by > 5 points, or R7 fired ≥ 2 times in the last 365 days (from `KillSwitch.r7_triggers`). These checks keep running while the satellite is halted.
+
+### 2026-11-12 — Satellite sleeve accounting
+- Each active strategy gets a ledger (cash + positions) seeded once with `max_weight × account equity`, split across active strategies. Fills update the ledger. Satellite equity = ledger cash + market value of ledger positions, which is what R6/R7 and retirement measure. The ledger cash is reserved: the core never invests it.
+- Rebalances are sized to the ledger's value, capped at `max_weight × account equity`, once per month (or ISO week). Orders under $10 are skipped. Satellite intents go through the full pipeline (coach passes them; tax; advisor in Phase 7; RiskGate).
+- `reset-halt satellite` needs the typed phrase `RESET SATELLITE`. It clears the latch, keeps the trigger history (it counts toward retirement), and re-bases the satellite peak on the next cycle.

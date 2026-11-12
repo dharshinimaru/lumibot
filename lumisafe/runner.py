@@ -233,6 +233,7 @@ class Engine:
         pending[order_id] = {
             "entry_id": entry.entry_id, "symbol": entry.intent.symbol,
             "side": Side(entry.intent.side).value, "source": Source(entry.intent.source).value,
+            "strategy_name": entry.intent.strategy_name,
         }
         self.state.set("pending_orders", pending)
 
@@ -252,6 +253,8 @@ class Engine:
                 pnl = sum((price - lot.cost_basis) * q for lot, q in consumed)
                 self.journal.record_event("realized", {"entry_id": info["entry_id"], "symbol": info["symbol"],
                                                        "pnl": pnl, "qty": qty}, ts=at)
+        if info["source"] == Source.SATELLITE.value and self.satellite is not None:
+            self.satellite.on_fill(info.get("strategy_name"), info["symbol"], info["side"], price, qty)
         self.state.set("lots", self.lots.to_list())
         self.state.save()
 
@@ -266,9 +269,10 @@ class Engine:
                 self.on_fill(oid, price, qty, at)
             elif status in ("canceled", "cancelled", "expired", "rejected"):
                 pending = self.state.get("pending_orders", {})
-                pending.pop(oid, None)
+                info = pending.pop(oid, None) or {}
                 self.state.set("pending_orders", pending)
-                self.journal.record_event("order_not_filled", {"order_id": oid, "status": status}, ts=at)
+                self.journal.record_event("order_not_filled", {"order_id": oid, "entry_id": info.get("entry_id"),
+                                                               "status": status}, ts=at)
 
     def trades_this_week(self, as_of: datetime) -> int:
         """Submitted satellite + user trades since Monday. Core trades are exempt from R5."""
@@ -407,8 +411,11 @@ class Engine:
                               rebalance_pending=bool(self.state.get("rebalance_pending", False)))
         self.state.set("rebalance_pending", plan.rebalance_pending)
         intents = list(plan.intents)
-        if self.satellite is not None and not self.kill_switch.satellite_latched:
-            intents += self.satellite.intents(snap, acct, executor)
+        if self.satellite is not None:
+            # Equity tracking, retirement and paper promotion run even while R7 is latched.
+            self.satellite.housekeeping(snap)
+            if not self.kill_switch.satellite_latched:
+                intents += self.satellite.intents(snap, acct, executor)
 
         outcomes = self.process(intents, snap, executor)
         if queued:
@@ -461,8 +468,27 @@ def yahoo_closes(symbol: str, as_of: datetime):
     return None if df is None else df["close"]
 
 
+def yahoo_history(symbols: list[str], as_of: datetime) -> dict:
+    """Adjusted daily bars for ``symbols`` up to ``as_of`` (no look-ahead)."""
+    return bridge.fetch_daily_history(list(symbols), None, as_of)
+
+
+def build_satellite(config: LumiSafeConfig, journal: Journal, state: StateStore, history=None,
+                    kill_switch=None, fractional: bool = True):
+    from lumisafe.portfolio.satellite import SatelliteManager
+    from lumisafe.promotion.registry import Registry
+    from lumisafe.strategies import CATALOG
+
+    if not config.satellite.enabled:
+        return None
+    return SatelliteManager(config.satellite, Registry(journal=journal), {n: cls() for n, cls in CATALOG.items()},
+                            journal, state, history or yahoo_history, benchmark=config.benchmark,
+                            fractional=fractional, kill_switch=kill_switch)
+
+
 def assemble_engine(config: LumiSafeConfig, journal: Journal, state: StateStore, *, mode: str,
-                    fractional: bool = True, history_fn=None, advisor=None, satellite=None) -> Engine:
+                    fractional: bool = True, history_fn=None, advisor=None, satellite=None,
+                    satellite_history=None) -> Engine:
     """The production wiring: coach, tax guard, inbox/pending stores (paper), optional advisor/satellite."""
     core_symbols = set(config.core.etfs)
     engine = Engine(
@@ -477,6 +503,9 @@ def assemble_engine(config: LumiSafeConfig, journal: Journal, state: StateStore,
     engine.pipeline.tax = TaxGuard(core_symbols, min_holding_days=config.risk.min_holding_days,
                                    realized_pnl=engine.realized_pnl)
     engine.tax = engine.pipeline.tax
+    if engine.satellite is None and mode == "paper":
+        engine.satellite = build_satellite(config, journal, state, satellite_history,
+                                           kill_switch=engine.kill_switch, fractional=fractional)
     return engine
 
 

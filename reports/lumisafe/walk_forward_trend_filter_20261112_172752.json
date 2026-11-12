@@ -1,0 +1,153 @@
+{
+  "strategy": "trend_filter",
+  "benchmark": "SPY",
+  "created_at": "2026-11-12T17:27:52.828120+00:00",
+  "data_start": "2006-01-01",
+  "data_end": "2025-12-31",
+  "years": 20.0,
+  "cost_per_trade": 0.001,
+  "folds": [
+    {
+      "train_start": "2006-01-01",
+      "train_end": "2009-12-31",
+      "test_start": "2010-01-01",
+      "test_end": "2011-12-31",
+      "chosen_params": {
+        "lookback_months": 3,
+        "top_n": 1
+      },
+      "train_sharpe": 0.7823,
+      "test_sharpe": 1.0213,
+      "test_return": 0.483,
+      "test_max_drawdown": 0.1497,
+      "benchmark_sharpe": 0.4486,
+      "benchmark_return": 0.1528,
+      "benchmark_max_drawdown": 0.1861
+    },
+    {
+      "train_start": "2008-01-01",
+      "train_end": "2011-12-31",
+      "test_start": "2012-01-01",
+      "test_end": "2013-12-31",
+      "chosen_params": {
+        "lookback_months": 3,
+        "top_n": 1
+      },
+      "train_sharpe": 0.9369,
+      "test_sharpe": 0.3187,
+      "test_return": 0.0717,
+      "test_max_drawdown": 0.196,
+      "benchmark_sharpe": 1.8032,
+      "benchmark_return": 0.5106,
+      "benchmark_max_drawdown": 0.0969
+    },
+    {
+      "train_start": "2010-01-01",
+      "train_end": "2013-12-31",
+      "test_start": "2014-01-01",
+      "test_end": "2015-12-31",
+      "chosen_params": {
+        "lookback_months": 3,
+        "top_n": 2
+      },
+      "train_sharpe": 0.9671,
+      "test_sharpe": 0.5203,
+      "test_return": 0.0978,
+      "test_max_drawdown": 0.1211,
+      "benchmark_sharpe": 0.6174,
+      "benchmark_return": 0.1598,
+      "benchmark_max_drawdown": 0.1191
+    },
+    {
+      "train_start": "2012-01-01",
+      "train_end": "2015-12-31",
+      "test_start": "2016-01-01",
+      "test_end": "2017-12-31",
+      "chosen_params": {
+        "lookback_months": 12,
+        "top_n": 3
+      },
+      "train_sharpe": 0.9247,
+      "test_sharpe": 1.898,
+      "test_return": 0.3607,
+      "test_max_drawdown": 0.0542,
+      "benchmark_sharpe": 1.621,
+      "benchmark_return": 0.3824,
+      "benchmark_max_drawdown": 0.0919
+    },
+    {
+      "train_start": "2014-01-01",
+      "train_end": "2017-12-31",
+      "test_start": "2018-01-01",
+      "test_end": "2019-12-31",
+      "chosen_params": {
+        "lookback_months": 6,
+        "top_n": 3
+      },
+      "train_sharpe": 0.8218,
+      "test_sharpe": 0.4203,
+      "test_return": 0.0941,
+      "test_max_drawdown": 0.1795,
+      "benchmark_sharpe": 0.8049,
+      "benchmark_return": 0.2434,
+      "benchmark_max_drawdown": 0.1935
+    },
+    {
+      "train_start": "2016-01-01",
+      "train_end": "2019-12-31",
+      "test_start": "2020-01-01",
+      "test_end": "2021-12-31",
+      "chosen_params": {
+        "lookback_months": 6,
+        "top_n": 3
+      },
+      "train_sharpe": 0.9535,
+      "test_sharpe": 1.0853,
+      "test_return": 0.4003,
+      "test_max_drawdown": 0.1901,
+      "benchmark_sharpe": 0.9387,
+      "benchmark_return": 0.5092,
+      "benchmark_max_drawdown": 0.3372
+    },
+    {
+      "train_start": "2018-01-01",
+      "train_end": "2021-12-31",
+      "test_start": "2022-01-01",
+      "test_end": "2023-12-31",
+      "chosen_params": {
+        "lookback_months": 6,
+        "top_n": 3
+      },
+      "train_sharpe": 0.8092,
+      "test_sharpe": -0.1635,
+      "test_return": -0.0461,
+      "test_max_drawdown": 0.2097,
+      "benchmark_sharpe": 0.1648,
+      "benchmark_return": 0.0265,
+      "benchmark_max_drawdown": 0.245
+    },
+    {
+      "train_start": "2020-01-01",
+      "train_end": "2023-12-31",
+      "test_start": "2024-01-01",
+      "test_end": "2025-12-31",
+      "chosen_params": {
+        "lookback_months": 3,
+        "top_n": 1
+      },
+      "train_sharpe": 0.7114,
+      "test_sharpe": 0.0324,
+      "test_return": -0.0219,
+      "test_max_drawdown": 0.3046,
+      "benchmark_sharpe": 1.2811,
+      "benchmark_return": 0.4784,
+      "benchmark_max_drawdown": 0.1876
+    }
+  ],
+  "oos_sharpe": 0.5941,
+  "oos_cagr": 0.0795,
+  "oos_max_drawdown": 0.3061,
+  "benchmark_oos_sharpe": 0.8415,
+  "benchmark_oos_max_drawdown": 0.3372,
+  "folds_matching_benchmark": 0.375
+}

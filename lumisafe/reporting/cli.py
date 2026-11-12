@@ -238,6 +238,88 @@ def confirm(intent_id):
     _queue_and_run(config, again, confirmed=True)
 
 
+# --- strategies & promotion ------------------------------------------------------------------------
+
+@main.command()
+def strategies():
+    """Registry: every satellite strategy with its state and key metrics."""
+    from lumisafe.promotion.registry import Registry
+    from lumisafe.strategies import CATALOG
+
+    reg = Registry().all()
+    for name in sorted(set(CATALOG) | set(reg)):
+        rec = reg.get(name)
+        if rec is None:
+            click.echo(f"{name:<16} not backtested yet (run `lumisafe backtest {name}`)")
+            continue
+        m = rec.get("backtest_metrics") or rec.get("metrics") or {}
+        bits = []
+        if "oos_sharpe" in m:
+            bits.append(f"OOS Sharpe {m['oos_sharpe']:.2f}")
+        if "oos_cagr" in m:
+            bits.append(f"OOS CAGR {m['oos_cagr']:+.1%}")
+        if "oos_max_drawdown" in m:
+            bits.append(f"max drawdown {m['oos_max_drawdown']:.1%}")
+        click.echo(f"{name:<16} {rec['state']:<14} {' · '.join(bits)}")
+        last = rec["history"][-1] if rec.get("history") else None
+        if last and last.get("reasons"):
+            click.echo(f"{'':<16} why: {'; '.join(last['reasons'])}")
+
+
+@main.command()
+@click.argument("strategy")
+def backtest(strategy):
+    """Run the walk-forward for STRATEGY, save the report, update the registry."""
+    from lumisafe.promotion import backtest_and_promote
+    from lumisafe.promotion.registry import Registry
+    from lumisafe.strategies import CATALOG
+
+    config = load_config(paths.config_path()) if paths.config_path().is_file() else None
+    bench = config.benchmark if config else "SPY"
+    if strategy not in CATALOG:
+        click.echo(f"Unknown strategy {strategy!r}. Available: {', '.join(sorted(CATALOG))}")
+        sys.exit(1)
+    cls = CATALOG[strategy]
+    symbols = sorted(set(cls().universe) | {bench})
+    click.echo(f"Loading daily history for {', '.join(symbols)}...")
+    history = history_provider(symbols, None, None)
+    report, path, state = backtest_and_promote(strategy, cls, history, Registry(journal=Journal()), benchmark=bench,
+                                               now=now_utc())
+    click.echo(f"Walk-forward: {len(report.folds)} folds, {report.data_start} → {report.data_end} "
+               f"({report.years:.1f} years), costs {report.cost_per_trade:.2%} per trade")
+    click.echo(f"Out-of-sample: Sharpe {report.oos_sharpe:.2f} (benchmark {report.benchmark_oos_sharpe:.2f}) · "
+               f"CAGR {report.oos_cagr:+.1%} · max drawdown {report.oos_max_drawdown:.1%} "
+               f"(benchmark {report.benchmark_oos_max_drawdown:.1%})")
+    click.echo(f"Matched the benchmark's risk-adjusted return in {report.folds_matching_benchmark:.0%} of folds.")
+    click.echo(f"State: {state.value}")
+    click.echo(f"Report saved to {path}")
+
+
+@main.command("reset-halt")
+@click.argument("what", type=click.Choice(["satellite"]))
+def reset_halt(what):
+    """Manually reset the satellite drawdown halt (R7). Asks for typed confirmation."""
+    from lumisafe.risk.kill_switch import RESET_CONFIRMATION, KillSwitch
+    from lumisafe.runner import StateStore
+
+    config = _load_config_or_exit()
+    store = StateStore(paths.state_path())
+    ks = KillSwitch(config.risk, store.get("kill_switch"))
+    if not ks.satellite_latched:
+        click.echo("The satellite is not halted.")
+        return
+    click.echo("The satellite was halted after a large drop. Resetting lets its strategies trade again.")
+    typed = input(f'Type "{RESET_CONFIRMATION}" to confirm: ')
+    if not ks.reset_satellite(typed):
+        click.echo("Not reset.")
+        sys.exit(1)
+    store.set("kill_switch", ks.to_dict())
+    store.set("satellite_peak_equity", 0.0)  # next cycle re-bases the peak at current satellite equity
+    store.save()
+    Journal().record_event("halt_reset", {"what": "satellite"}, ts=now_utc())
+    click.echo("Satellite halt reset.")
+
+
 # --- live gate (human only) -------------------------------------------------------------------------
 
 @main.command("go-live")

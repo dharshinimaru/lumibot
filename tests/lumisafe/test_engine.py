@@ -141,6 +141,10 @@ class FakeSatellite:
     def __init__(self, equity):
         self.eq = equity
         self.calls = 0
+        self.housekeeping_calls = 0
+
+    def housekeeping(self, snap):
+        self.housekeeping_calls += 1
 
     def symbols(self):
         return {"QQQ"}
@@ -170,6 +174,7 @@ def test_r7_latch_stops_satellite_and_freezes_its_peak(tmp_path):
     ex.now = T0 + timedelta(days=2)
     engine.cycle(ex)
     assert sat.calls == 1 and engine.state.get("satellite_peak_equity") == 10_000
+    assert sat.housekeeping_calls == 3  # retirement/promotion checks keep running while halted
 
 
 def test_strategy_parameters_shape(tmp_path):
