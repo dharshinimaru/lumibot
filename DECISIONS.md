@@ -173,3 +173,31 @@ Every assumption, deviation and ambiguity resolution made while implementing
 - Added `lumisafe run-paper [--loop]` (not in §9's list): there must be a command that actually runs the plan on Alpaca paper. Default is one cycle (cron-friendly); `--loop` runs Lumibot's daily loop.
 - `lumisafe go-live` only runs `live_unlock.unlock()` and reports the result; it never connects a live broker (Phase 3 decision). Per §3 rule 2 the agent never runs it, and tests only assert that the command exists.
 - Integration tests are opt-in: `tests/lumisafe/conftest.py` skips `integration`-marked tests unless `-m` mentions `integration`. A plain `pytest` run had executed them and placed a second ~$50 **paper** order. Paper only, but unintended, so it can't happen again.
+
+---
+
+## Phase 5 — Coach + tax (2026-11-12)
+
+### 2026-11-12 — `MarketContext` (not specified in §5.6)
+- `MarketContext(closes, user_intents_today, confirmed_intent_ids)`. `closes` are adjusted daily closes ending at the snapshot time (paper: Yahoo via the bridge; never read in backtests because only USER intents need them). The coach reads time only from `snap.as_of`.
+- "20 trading days" = the last 21 closes. B1 threshold ≤ −10%, B2 ≥ +25%, B3 = 3rd+ user intent today, counted from journal USER entries since local midnight (any verdict, so delayed and blocked ideas also count).
+
+### 2026-11-12 — B1 recovery context
+- Computed only from the symbol's own history: every earlier 20-day drop at least as deep as today's (or −10%, whichever is deeper), de-duplicated so one episode counts once, with the return 252 trading days later. The explanation reports the count, how many were higher a year later, and the median. With too little history, or no earlier comparable drop, it says exactly that. Nothing is invented.
+- The release time comes before the context in the text, so trimming to 300 chars cuts the context, never the action.
+
+### 2026-11-12 — B4 confirmation creates a linked re-entry intent
+- **What:** J2 says one entry per intent, and the original intent already has its DELAY entry. B4 says a confirmed intent re-enters the pipeline from the start.
+- **Decision:** `lumisafe confirm <id>` creates a NEW `OrderIntent` (new id; same symbol/side/qty; reason names the original id) and records a `delayed_intent_confirmed` event linking both ids. The re-entry carries `confirmed_intent_ids` so the coach doesn't delay the same decision again. Tax and risk review it normally. Confirmation is allowed from `release_at` (24h) up to `created_at + 72h`, after which the pending item is marked expired (also swept every paper cycle) and a `delayed_intent_expired` event is journaled.
+- Pending delayed intents live in `~/.lumisafe/pending.json`, a mutable status store. The journal keeps the immutable DELAY record.
+
+### 2026-11-12 — One submission path for user intents
+- `lumisafe propose` doesn't talk to the broker itself. It queues the intent in `~/.lumisafe/inbox.json` and runs one paper cycle, and the engine processes the inbox through the same `Pipeline` as core intents (after the core's own intents, so DCA keeps priority for cash). Only `runner.py` ever submits.
+- Queued symbols are priced in that cycle's snapshot. The first propose test caught that the snapshot only priced core symbols, which made the gate block every user trade with "no valid price".
+- Inbox items are removed only **after** they're journaled, and an item already in the journal is skipped, so an interrupted cycle can neither lose (J2) nor double-process an intent.
+
+### 2026-11-12 — TaxGuard details
+- **T1 "sold at a loss"** needs the sale's cost basis, which `JournalEntry` doesn't carry. On every SELL fill the engine journals a `realized` event `{entry_id, pnl}` computed from the T3 lots consumed. `TaxGuard` takes a `realized_pnl(entry_id)` lookup. If no event exists, it falls back to comparing the sale's fill price with the average cost of lots still held; if neither is known, T1 doesn't fire (it can't prove a loss). Window: sale timestamp within 30 calendar days before `snap.as_of`.
+- **T2:** "non-core SELL" means `source != CORE`. Gain counts only T3-selected lots held < 365 calendar days with price > cost. Extra tax = gain × (short-term − long-term placeholder rate), defaults 32% / 15%, configurable in the constructor. The text names the date the lots turn long-term.
+- **T3:** `select_lots` (shared with the engine's lot consumption) picks highest cost first and skips lots younger than `min_holding_days` for non-core sells (R9). Core rebalance sells may use any lot.
+- **T4:** every explanation is clipped to fit and then ends with " Not tax advice." (always ≤ 300 chars).

@@ -23,12 +23,16 @@ from typing import Any, Callable
 
 from lumisafe import paths
 from lumisafe.adapters import lumibot_bridge as bridge
+from lumisafe.coach.behavior import BehaviorCoach, MarketContext, PendingStore
 from lumisafe.config.schema import LumiSafeConfig
-from lumisafe.journal.journal import PAPER_CYCLE_EVENT, Journal, JournalEntry, new_entry_id
+from lumisafe.journal.journal import (
+    PAPER_CYCLE_EVENT, Journal, JournalEntry, intent_from_dict, intent_to_dict, new_entry_id,
+)
 from lumisafe.portfolio.core import CoreIndexStrategy
 from lumisafe.portfolio.lots import LotBook
 from lumisafe.risk.gate import RiskGate
 from lumisafe.risk.kill_switch import KillSwitch
+from lumisafe.tax.guard import TaxGuard
 from lumisafe.types import (
     OrderIntent, PortfolioSnapshot, ReviewResult, Side, Source, Verdict, clip_explanation,
 )
@@ -57,6 +61,34 @@ class StateStore:
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps(self.data, indent=2, sort_keys=True, default=str))
             tmp.replace(self.path)
+
+
+class Inbox:
+    """User intents queued by `lumisafe propose` / `confirm`, drained by the next paper cycle."""
+
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+
+    def push(self, intent: OrderIntent, confirmed: bool = False) -> None:
+        items = self._load()
+        items.append({"intent": intent_to_dict(intent), "confirmed": confirmed})
+        self._write(items)
+
+    def peek(self) -> list[tuple[OrderIntent, bool]]:
+        return [(intent_from_dict(i["intent"]), bool(i.get("confirmed"))) for i in self._load()]
+
+    def remove(self, intent_ids: set[str]) -> None:
+        """Drop processed intents. Called only after they are journaled, so none is lost (J2)."""
+        self._write([i for i in self._load() if i["intent"]["intent_id"] not in intent_ids])
+
+    def _load(self) -> list[dict]:
+        return json.loads(self.path.read_text() or "[]") if self.path.is_file() else []
+
+    def _write(self, items: list[dict]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(items, indent=2))
+        tmp.replace(self.path)
 
 
 # --- pipeline ---------------------------------------------------------------------------
@@ -172,7 +204,9 @@ class CycleReport:
 class Engine:
     def __init__(self, config: LumiSafeConfig, journal: Journal, state: StateStore, *,
                  mode: str | None = None, fractional: bool = True, coach=None, tax=None, advisor=None,
-                 satellite=None, context_builder: Callable[..., PipelineContext] | None = None):
+                 satellite=None, context_builder: Callable[..., PipelineContext] | None = None,
+                 inbox: Inbox | None = None, pending: PendingStore | None = None,
+                 history_fn: Callable[[str, datetime], Any] | None = None):
         self.config = config
         self.mode = mode or config.mode
         if self.mode not in ("backtest", "paper"):
@@ -185,6 +219,10 @@ class Engine:
         self.lots = LotBook.from_list(state.get("lots"))
         self.satellite = satellite
         self.context_builder = context_builder
+        self.inbox = inbox
+        self.pending = pending
+        self.history_fn = history_fn
+        self.advisor = advisor
         self.pipeline = Pipeline(journal, self.gate, coach=coach, tax=tax, advisor=advisor,
                                  on_submitted=self._remember_order)
 
@@ -208,8 +246,12 @@ class Engine:
         if info["side"] == Side.BUY.value:
             self.lots.add(info["symbol"], qty, price, at)
         else:
-            self.lots.consume(info["symbol"], qty, at, self.config.risk.min_holding_days,
-                              respect_holding_period=info["source"] != Source.CORE.value)
+            consumed = self.lots.consume(info["symbol"], qty, at, self.config.risk.min_holding_days,
+                                         respect_holding_period=info["source"] != Source.CORE.value)
+            if consumed:
+                pnl = sum((price - lot.cost_basis) * q for lot, q in consumed)
+                self.journal.record_event("realized", {"entry_id": info["entry_id"], "symbol": info["symbol"],
+                                                       "pnl": pnl, "qty": qty}, ts=at)
         self.state.set("lots", self.lots.to_list())
         self.state.save()
 
@@ -281,22 +323,63 @@ class Engine:
 
     def context_for(self, intent: OrderIntent, snap: PortfolioSnapshot, executor: Any) -> PipelineContext:
         if self.context_builder is None:
-            return PipelineContext()
+            return self.default_context(intent, snap, executor)
         return self.context_builder(self, intent, snap, executor)
 
-    def process(self, intents: list[OrderIntent], snap: PortfolioSnapshot, executor: Any) -> list[Outcome]:
+    def process(self, intents: list[OrderIntent], snap: PortfolioSnapshot, executor: Any,
+                confirmed: frozenset[str] = frozenset()) -> list[Outcome]:
         outcomes = []
+        self._confirmed = confirmed
         # Sells first, so a cycle never needs cash it doesn't have yet.
         for intent in sorted(intents, key=lambda i: 0 if i.side is Side.SELL else 1):
             outcome = self.pipeline.run(intent, snap, executor, self.context_for(intent, snap, executor))
             outcomes.append(outcome)
+            if outcome.entry.final is Verdict.DELAY and self.pending is not None:
+                release = next((r.release_at for r in outcome.entry.reviews if r.release_at), None)
+                if release is not None:
+                    self.pending.add(intent, release)
             snap = self.after_submission(snap, outcome)
         return outcomes
+
+    # -- reviewer inputs -----------------------------------------------------------------------
+
+    def realized_pnl(self, entry_id: str) -> float | None:
+        for ev in self.journal.events("realized"):
+            if ev.payload.get("entry_id") == entry_id:
+                return float(ev.payload["pnl"])
+        return None
+
+    def user_intents_today(self, as_of: datetime) -> int:
+        start = as_of.replace(hour=0, minute=0, second=0, microsecond=0)
+        return len(self.journal.query(source=Source.USER, since=start))
+
+    def default_context(self, intent: OrderIntent, snap: PortfolioSnapshot, executor: Any) -> PipelineContext:
+        recent_sales = self.journal.query(symbol=intent.symbol, side=Side.SELL, submitted=True,
+                                          since=snap.as_of - timedelta(days=31))
+        market = None
+        if intent.source is Source.USER:
+            closes = {}
+            if self.history_fn is not None:
+                try:
+                    series = self.history_fn(intent.symbol, snap.as_of)
+                    if series is not None:
+                        closes[intent.symbol] = series
+                except Exception:
+                    closes = {}
+            market = MarketContext(closes=closes, user_intents_today=self.user_intents_today(snap.as_of),
+                                   confirmed_intent_ids=getattr(self, "_confirmed", frozenset()))
+        advisor_context = None
+        if self.advisor is not None and intent.source is not Source.CORE:
+            from lumisafe.advisor.advisor import build_advisor_context
+
+            advisor_context = build_advisor_context(intent, snap, self.journal, self.history_fn)
+        return PipelineContext(market=market, recent_sales=recent_sales, advisor_context=advisor_context)
 
     # -- one cycle ---------------------------------------------------------------------------
 
     def cycle(self, executor: Any) -> CycleReport:
-        acct = bridge.account_state(executor, self.symbols())
+        queued = self.inbox.peek() if self.inbox is not None else []
+        acct = bridge.account_state(executor, self.symbols() | {i.symbol for i, _ in queued})
         now = acct.as_of
         if not acct.is_backtesting:
             self._reconcile_pending(executor, now)
@@ -328,6 +411,24 @@ class Engine:
             intents += self.satellite.intents(snap, acct, executor)
 
         outcomes = self.process(intents, snap, executor)
+        if queued:
+            for o in outcomes:
+                snap = self.after_submission(snap, o)
+            snap = replace(snap, trades_this_week=self.trades_this_week(now))
+            confirmed = frozenset(i.intent_id for i, c in queued if c)
+            done = set()
+            for user_intent, _ in queued:
+                if self.journal.query(intent_id=user_intent.intent_id):
+                    done.add(user_intent.intent_id)  # already processed by an interrupted cycle
+                    continue
+                out = self.process([user_intent], snap, executor, confirmed)
+                outcomes += out
+                snap = self.after_submission(snap, out[0])
+                done.add(user_intent.intent_id)
+            self.inbox.remove(done)
+        if self.pending is not None:
+            for p in self.pending.expire_old(now):
+                self.journal.record_event("delayed_intent_expired", {"intent_id": p.intent.intent_id}, ts=now)
         self.state.set("lots", self.lots.to_list())
         self.state.set("last_snapshot", {
             "as_of": now.isoformat(), "cash": acct.cash, "equity": acct.equity,
@@ -349,7 +450,34 @@ def build_engine(params: dict) -> Engine:
     factory = params.get("engine_factory")
     if factory is not None:
         return factory(config, journal, state, params)
-    return Engine(config, journal, state, mode=params.get("mode"), fractional=params.get("fractional", True))
+    return assemble_engine(config, journal, state, mode=params.get("mode") or config.mode,
+                           fractional=params.get("fractional", True))
+
+
+def yahoo_closes(symbol: str, as_of: datetime):
+    """Adjusted daily closes up to ``as_of`` (no look-ahead)."""
+    hist = bridge.fetch_daily_history([symbol], None, as_of)
+    df = hist.get(symbol)
+    return None if df is None else df["close"]
+
+
+def assemble_engine(config: LumiSafeConfig, journal: Journal, state: StateStore, *, mode: str,
+                    fractional: bool = True, history_fn=None, advisor=None, satellite=None) -> Engine:
+    """The production wiring: coach, tax guard, inbox/pending stores (paper), optional advisor/satellite."""
+    core_symbols = set(config.core.etfs)
+    engine = Engine(
+        config, journal, state, mode=mode, fractional=fractional,
+        coach=BehaviorCoach(core_symbols),
+        advisor=advisor,
+        satellite=satellite,
+        inbox=Inbox(paths.inbox_path()) if mode == "paper" else None,
+        pending=PendingStore(paths.pending_path()) if mode == "paper" else None,
+        history_fn=history_fn if history_fn is not None else (yahoo_closes if mode == "paper" else None),
+    )
+    engine.pipeline.tax = TaxGuard(core_symbols, min_holding_days=config.risk.min_holding_days,
+                                   realized_pnl=engine.realized_pnl)
+    engine.tax = engine.pipeline.tax
+    return engine
 
 
 def get_strategy_class():

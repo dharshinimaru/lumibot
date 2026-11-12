@@ -36,3 +36,13 @@ def reports_dir() -> Path:
     d = home() / "reports"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def inbox_path() -> Path:
+    """User intents waiting for the next paper cycle (`lumisafe propose`)."""
+    return home() / "inbox.json"
+
+
+def pending_path() -> Path:
+    """Delayed user intents awaiting `lumisafe confirm` (B4)."""
+    return home() / "pending.json"

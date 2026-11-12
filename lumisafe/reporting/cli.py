@@ -151,6 +151,93 @@ def run_paper(loop):
     click.echo("Paper cycle complete. See `lumisafe status` and `lumisafe journal`.")
 
 
+# --- user intents: propose / confirm ----------------------------------------------------------------
+
+def _print_outcome(intent_id: str) -> None:
+    entries = Journal().query(intent_id=intent_id)
+    if not entries:
+        click.echo("Queued. It will be reviewed on the next paper cycle (`lumisafe run-paper`).")
+        return
+    e = entries[0]
+    for r in e.reviews:
+        click.echo(f"  {r.reviewer:<8} {r.verdict.value.upper():<8} {r.explanation}")
+    click.echo(f"Result: {e.final.value.upper()}")
+    if e.final.value == "delay":
+        release = next((r.release_at for r in e.reviews if r.release_at), None)
+        when = f" after {release:%Y-%m-%d %H:%M %Z}" if release else ""
+        click.echo(f"To go ahead anyway, run `lumisafe confirm {intent_id[:8]}`{when} (expires after 72h).")
+
+
+def _queue_and_run(config: LumiSafeConfig, intent, confirmed: bool) -> None:
+    from lumisafe.runner import Inbox
+
+    Inbox(paths.inbox_path()).push(intent, confirmed=confirmed)
+    paper_runner(config, run_once=True)
+    _print_outcome(intent.intent_id)
+
+
+@main.command()
+@click.argument("side", type=click.Choice(["BUY", "SELL", "buy", "sell"]))
+@click.argument("symbol")
+@click.argument("quantity", type=float)
+def propose(side, symbol, quantity):
+    """Propose a trade (e.g. `propose BUY AAPL 3`). It goes through the full safety pipeline."""
+    import uuid
+
+    from lumisafe.types import OrderIntent, Side, Source
+
+    config = _load_config_or_exit()
+    if quantity <= 0:
+        click.echo("Quantity must be positive.")
+        sys.exit(1)
+    intent = OrderIntent(
+        intent_id=str(uuid.uuid4()), created_at=now_utc(), source=Source.USER, symbol=symbol.upper(),
+        side=Side(side.lower()), quantity=quantity, reason="Your request via `lumisafe propose`.",
+    )
+    click.echo(f"Reviewing {side.upper()} {quantity:g} {symbol.upper()} [{intent.intent_id[:8]}]...")
+    _queue_and_run(config, intent, confirmed=False)
+
+
+@main.command()
+@click.argument("intent_id")
+def confirm(intent_id):
+    """Confirm a delayed trade after its cooling-off period. It re-enters the pipeline from the start."""
+    import uuid
+
+    from lumisafe.coach.behavior import PendingStore
+    from lumisafe.types import OrderIntent
+
+    config = _load_config_or_exit()
+    store = PendingStore(paths.pending_path())
+    p = store.get(intent_id)
+    if p is None:
+        click.echo(f"No delayed trade matches {intent_id!r}.")
+        sys.exit(1)
+    if p.status != "pending":
+        click.echo(f"That trade was already {p.status}.")
+        sys.exit(1)
+    now = now_utc()
+    if now >= p.expires_at:
+        store.set_status(p.intent.intent_id, "expired")
+        Journal().record_event("delayed_intent_expired", {"intent_id": p.intent.intent_id}, ts=now)
+        click.echo("That trade expired (delayed trades must be confirmed within 72 hours). Propose it again if needed.")
+        sys.exit(1)
+    if now < p.release_at:
+        click.echo(f"Still cooling off. You can confirm after {p.release_at:%Y-%m-%d %H:%M %Z}.")
+        sys.exit(1)
+    orig = p.intent
+    again = OrderIntent(
+        intent_id=str(uuid.uuid4()), created_at=now, source=orig.source, symbol=orig.symbol, side=orig.side,
+        quantity=orig.quantity, reason=f"Confirmed after cooling-off (original {orig.intent_id[:8]}): {orig.reason}",
+        strategy_name=orig.strategy_name,
+    )
+    store.set_status(orig.intent_id, "confirmed")
+    Journal().record_event("delayed_intent_confirmed", {"intent_id": orig.intent_id, "reentry": again.intent_id},
+                           ts=now)
+    click.echo(f"Confirmed. Re-checking {orig.side.value.upper()} {orig.quantity:g} {orig.symbol} from the start...")
+    _queue_and_run(config, again, confirmed=True)
+
+
 # --- live gate (human only) -------------------------------------------------------------------------
 
 @main.command("go-live")

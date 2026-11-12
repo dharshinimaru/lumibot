@@ -176,3 +176,20 @@ def test_strategy_parameters_shape(tmp_path):
     p = strategy_parameters(config(), journal_path=tmp_path / "j.db", state_path=None, mode="backtest")
     assert p["mode"] == "backtest" and p["state_path"] is None
     assert LumiSafeConfig.model_validate(p["lumisafe_config"]) == config()
+
+
+def test_inbox_intents_are_processed_once_even_after_an_interrupted_cycle(tmp_path):
+    from lumisafe.runner import Inbox
+
+    inbox = Inbox(tmp_path / "inbox.json")
+    journal = Journal(tmp_path / "j.db")
+    engine = Engine(config(), journal, StateStore(None), mode="paper", inbox=inbox)
+    ex = FakeExecutor(T0, 10_000, {**PRICES, "AAPL": 100.0}, auto_fill=False, is_backtesting=False)
+    a, b = intent("AAPL", qty=1, source=Source.USER), intent("AAPL", qty=1, source=Source.USER)
+    inbox.push(a)
+    inbox.push(b)
+    engine.pipeline.run(a, engine.build_snapshot(bridge.account_state(ex, {"AAPL"})), ex)  # "interrupted" run
+    engine.cycle(ex)
+    assert len(journal.query(intent_id=a.intent_id)) == 1
+    assert len(journal.query(intent_id=b.intent_id)) == 1
+    assert inbox.peek() == []
