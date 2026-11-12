@@ -291,7 +291,7 @@ def test_r11_malformed_intent_blocks(bad):
 
 
 @pytest.mark.parametrize("bad", [
-    {"prices": {}}, {"prices": {"VTI": 0.0}}, {"equity": 0.0}, {"cash": -5.0},
+    {"prices": {}}, {"prices": {"VTI": 0.0}}, {"equity": 0.0}, {"cash": float("nan")},
     {"positions": {"VTI": -1.0}}, {"trades_this_week": -1}, {"lots": ["not a lot"]},
 ])
 def test_r11_malformed_snapshot_blocks(bad):
@@ -342,3 +342,9 @@ def test_explanations_are_short_plain_english():
     r = GATE.check(intent("AAPL", qty=100), s)
     assert 0 < len(r.explanation) <= 300
     assert math.isfinite(r.adjusted_quantity)
+
+
+def test_r3_negative_cash_blocks_buys_but_allows_sells_that_repair_it():
+    s = snapshot(cash=-50.0, positions={"VTI": 10}, prices={"VTI": 100.0})
+    assert GATE.check(intent("VTI", qty=1, source=Source.CORE), s).verdict is Verdict.BLOCK
+    assert GATE.check(intent("VTI", Side.SELL, 1, source=Source.CORE), s).verdict is Verdict.APPROVE

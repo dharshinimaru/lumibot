@@ -122,7 +122,7 @@ class RiskGate:
             return _block(f"{sym} is already at the {cap:.0%} limit for one {kind}.")
         final_qty = min(qty, room)
 
-        if not limits.affordable(final_qty, price, snap.cash):  # R3
+        if not limits.affordable(final_qty, price, snap.cash):  # R3 (also catches cash already < 0)
             return _block(
                 f"Not enough cash: {final_qty:g} {sym} costs about ${final_qty * price:,.2f} and you have "
                 f"${snap.cash:,.2f}. Borrowing (margin) is never used."

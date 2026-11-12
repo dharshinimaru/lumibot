@@ -107,3 +107,38 @@ Every assumption, deviation and ambiguity resolution made while implementing
 
 ### 2026-11-12 — Guard test for live_unlock.py
 - Added `test_live_unlock_frozen.py`, which pins the SHA-256 of `live_unlock.py` as committed in Phase 1. The agent can't edit it accidentally without a red test. The owner may update both together.
+
+---
+
+## Phase 3 — Core (2026-11-12)
+
+### 2026-11-12 — Pipeline semantics
+- `runner.Pipeline.run` is the only place `bridge.submit()` is called. It runs coach → tax → advisor → risk, submits only on APPROVE/RESIZE from the RiskGate, then writes exactly one journal entry (J2) **after** submission so the final verdict is known. Any exception (reviewer crash, broker error) → nothing submitted, final BLOCK, plus an extra `pipeline` review explaining why (fail closed).
+- A RESIZE whose `adjusted_quantity` breaks R10 (None, ≤0, ≥ original) is treated as BLOCK. The pipeline doesn't trust the gate blindly.
+- WARN from tax/advisor continues to the next stage. DELAY (coach), BLOCK (tax/risk) and VETO (advisor) stop the flow.
+- Within a cycle, sells run before buys. After each submission the snapshot is updated locally (cash spent, position added, non-core trade counted), so later intents in the same cycle see it. Sale proceeds aren't credited until filled.
+- The AST test enforces that only `runner.py` calls `bridge.submit` (direct, aliased, from-import, or via `getattr`), and that only the bridge calls Lumibot's `create_order`/`submit_order`.
+
+### 2026-11-12 — Core contribution semantics
+- **What:** §7.1 says "buys on the first trading day of each month with `monthly_contribution_usd`". Alpaca paper accounts can't receive deposits, and Lumibot backtests have a fixed budget.
+- **Decision:** each first trading day of a month the core invests `min(monthly_contribution_usd, investable cash)`. **`monthly_contribution_usd: 0` means lump-sum mode**: invest all investable cash (used for backtests and for users who want to invest their whole balance). Investable cash = cash − satellite reserve − a 2% cushion.
+- **Why a 2% cushion:** in the first 10-year run, fills landed at the next bar's price, above the decision price, and cash went slightly negative. On Alpaca a paper (margin) account would silently borrow. Orders under $10 are skipped as dust.
+- Rebalance: on rebalance-check days, if drift after the contribution exceeds `rebalance_band`, the core sells overweight ETFs back to target. The next cycle (`rebalance_pending`) reinvests the proceeds into underweights.
+
+### 2026-11-12 — Negative cash is an account state, not malformed input (gate change)
+- **What:** in Phase 2 I counted `snap.cash < 0` as malformed (R11 → BLOCK). In the 10-year backtest that froze the account after a fill overshoot: even the rebalance **sells** that would restore cash were blocked.
+- **Decision:** negative cash is no longer "malformed". BUYs are still blocked, now by R3 (`qty*price <= cash` fails for any positive buy). SELLs, which raise cash, can proceed. I changed my own Phase 2 test case from `cash=-5` to `cash=NaN` (still malformed) and added `test_r3_negative_cash_blocks_buys_but_allows_sells_that_repair_it`. No invariant got weaker: no order can make cash more negative.
+
+### 2026-11-12 — Backtest costs and broker isolation
+- Costs: Lumibot's `TradingSlippage` is an absolute price amount, so §8's "5 bps + 0.05% slippage" is charged as a single 0.10% `TradingFee(percent_fee=0.001)` on buys and sells.
+- Lumibot's `credentials.py` auto-builds an Alpaca broker (and opens a websocket) from `.env` keys at import time. The bridge sets `LUMIBOT_LAZY_CREDENTIALS=true` (setdefault) and forces `IS_BACKTESTING=true` during backtests (restored afterwards), so a backtest never touches a broker.
+- Lumibot bug noticed (not fixed, `lumibot/` is off limits): `YahooHelper.get_symbols_data` is defined twice and the second definition calls itself (infinite recursion). The bridge uses the per-symbol `get_symbol_data`. Worth reporting upstream.
+
+### 2026-11-12 — Paper only; no live broker factory in the bridge
+- `make_paper_broker()` always passes `PAPER: True` and refuses if `ALPACA_IS_PAPER` is set to a non-true value or keys are missing.
+- **Deliberately not built:** a live-broker factory. §10 describes the human gate (built in Phase 1), but writing a `PAPER: False` broker config would be "writing live-trading configuration", which §3 rule 2 forbids. Wiring live trading after `live_unlock.unlock()` succeeds is left to the human owner. `lumisafe go-live` (Phase 4) only runs the four checks and reports the result.
+
+### 2026-11-12 — Fills and state
+- Backtests: fills arrive via `on_filled_order`. Paper: fills may arrive after the run-once process exits, so pending order IDs live in `~/.lumisafe/state.json` and are reconciled through `get_order()` on the next cycle. Canceled/expired orders are dropped and journaled as an `order_not_filled` event.
+- `trades_this_week` (R5) counts submitted **satellite + user** trades since Monday 00:00 (account time zone). Core trades are exempt from R5, so they don't use up the user's weekly allowance either.
+- The `paper_cycle` heartbeat is written on every cycle with the actual mode. Backtest journals live in their own file under `~/.lumisafe/reports/`, never in the paper journal.

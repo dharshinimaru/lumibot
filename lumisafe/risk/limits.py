@@ -61,8 +61,6 @@ def validate(intent: OrderIntent, snap: PortfolioSnapshot) -> str | None:
             return f"snapshot {name} is not a number"
     if snap.equity <= 0:
         return "account equity is zero or negative"
-    if snap.cash < 0:
-        return "account cash is already negative"
     if not isinstance(snap.trades_this_week, int) or isinstance(snap.trades_this_week, bool) \
             or snap.trades_this_week < 0:
         return "weekly trade count is invalid"
