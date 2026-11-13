@@ -533,6 +533,33 @@ def signals_study():
     click.echo("\n" + DISCLAIMER)
 
 
+def signals_live():  # indirection for tests
+    from lumisafe.adapters.alpaca_data import AlpacaMarketData, LiveMarketData
+
+    return LiveMarketData(_market_data())
+
+
+@signals.command("today")
+def signals_today():
+    """What the signals that passed the study point to for the next market open (read-only)."""
+    import json as _json
+
+    from lumisafe.signals.today import format_today, scan
+
+    files = sorted(paths.reports_dir().glob("signals_*.json"))
+    if not files:
+        click.echo("No signal study yet. Run `lumisafe signals fetch`, then `lumisafe signals study`.")
+        sys.exit(1)
+    d = _json.loads(files[-1].read_text())
+    picks, pick_stats = d.get("current_picks", {}), d.get("current_stats", {})
+    snap = _state().get("last_snapshot") or {}
+    config = load_config(paths.config_path()) if paths.config_path().is_file() else None
+    slice_value = (config.satellite.max_weight * snap["equity"]) if (config and snap.get("equity")) else None
+    ideas, avoid = scan(signals_live(), picks, pick_stats, datetime.now(timezone.utc)) if picks else ([], [])
+    click.echo(format_today(ideas, avoid, picks, slice_value))
+    click.echo("\n" + DISCLAIMER)
+
+
 @signals.command("report")
 def signals_report():
     """Show the last signal study."""

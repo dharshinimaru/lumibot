@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -96,7 +96,12 @@ def run(md, start: date = date(2016, 1, 4), end: date = date(2025, 12, 31),
     from lumisafe.promotion.criteria import backtest_is_valid, backtest_to_paper
 
     v, p = backtest_is_valid(wf), backtest_to_paper(wf)
+    # what `lumisafe signals today` may use from now on: selected on everything that has closed
+    current = study.select(trades, before=end + timedelta(days=1))
+    current_stats = {s: asdict(study.stats([t for t in trades if t.entry_day > DISCOVERY_END], s, h, "2022-2025"))
+                     for s, h in current.items()}
     return {"walk_forward": wf.to_dict(), "passed": v.passed and p.passed, "reasons": v.reasons + p.reasons,
+            "current_picks": current, "current_stats": current_stats,
             "table": table, "picks_by_year": picks, "events": len(events), "entries": len(entries),
             "oos_cagr": _cagr(oos), "spy_cagr": _cagr(bench)}
 

@@ -168,3 +168,56 @@ def test_portfolio_caps_positions_and_charges_costs():
     exit_day = r.loc[pd.Timestamp("2020-03-10")]  # flat price that day: only the exit costs
     assert exit_day == pytest.approx(0.10 * (-(0.002 - study.SELL_FEE) / 2 - study.SELL_FEE))
     assert r.loc[pd.Timestamp("2020-03-11")] == 0.0  # position closed
+
+
+# --- today's shortlist --------------------------------------------------------------------------------------
+
+
+class FakeLive:
+    def __init__(self, news, last_close=100.0, partial_today=None):
+        self._news, self.last_close, self.partial = news, last_close, partial_today
+
+    def recent_daily(self, symbols, days=420, adjustment="all"):
+        idx = pd.bdate_range(end="2026-11-12", periods=300)
+        if self.partial:
+            idx = idx.append(pd.DatetimeIndex([pd.Timestamp("2026-11-13")]))
+        px = np.full(len(idx), 100.0)
+        df = pd.DataFrame({"open": px, "high": px, "low": px, "close": px, "volume": 1e6}, index=idx)
+        if self.partial:  # today's half-finished bar: down 9% so far
+            df.iloc[-1] = [100.0, 100.0, 91.0, 91.0, 2e6]
+        return {"ABC": df, "SPY": df.copy()}
+
+    def news(self, symbols, start, end):
+        return self._news
+
+
+def test_today_lists_only_passed_signals_and_an_avoid_list():
+    from lumisafe.signals.today import format_today, scan
+
+    news = [item("ABC Q3 EPS $1.30 Beats $1.10 Estimate, Sales $5B Beat $4.8B Estimate", ("ABC",),
+                 "2026-11-12T21:05:00+00:00"),
+            item("Morgan Stanley Downgrades XYZ to Underweight", ("XYZ",), "2026-11-12T22:00:00+00:00")]
+    now = datetime(2026, 11, 12, 18, 0, tzinfo=NY)  # Thursday evening
+    ideas, avoid = scan(FakeLive(news), {"earnings_beat_strong": 10}, {"earnings_beat_strong": {
+        "trades": 80, "hit_rate": 0.6, "mean_net": 0.012, "mean_excess": 0.006}}, now)
+    assert [(i.signal, i.symbol, i.buy_at_open_on) for i in ideas] == [("earnings_beat_strong", "ABC", date(2026, 11, 13))]
+    assert ideas[0].sell_at_close_on == date(2026, 11, 27)  # 10 trading days; Thanksgiving (Nov 26) skipped
+    text = format_today(ideas, avoid, {"earnings_beat_strong": 10}, 10_000.0)
+    assert "BUY ABC at the open on Fri Nov 13" in text and "60% ended positive" in text and "$1,000" in text
+    # signals that didn't pass are never suggested
+    ideas, _ = scan(FakeLive(news), {"upgrade_bullish": 5}, {}, now)
+    assert ideas == []
+
+
+def test_today_never_uses_a_half_finished_day():
+    from lumisafe.signals.today import scan
+
+    now = datetime(2026, 11, 13, 11, 0, tzinfo=NY)  # market open, ABC down 9% so far today
+    ideas, _ = scan(FakeLive([], partial_today=True), {"pullback_uptrend": 5}, {}, now)
+    assert ideas == []  # the dip only counts once today's close is final
+
+
+def test_today_with_no_passed_signals_says_so_plainly():
+    from lumisafe.signals.today import format_today
+
+    assert "nothing to suggest" in format_today([], [], {}, None)

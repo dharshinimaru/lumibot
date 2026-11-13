@@ -246,7 +246,7 @@ class LiveMarketData:
     def __init__(self, md: AlpacaMarketData):
         self.md = md
 
-    def recent_daily(self, symbols: Iterable[str], days: int = 45) -> dict[str, pd.DataFrame]:
+    def recent_daily(self, symbols: Iterable[str], days: int = 45, adjustment: str = "split") -> dict[str, pd.DataFrame]:
         from alpaca.data.enums import Adjustment, DataFeed
         from alpaca.data.requests import StockBarsRequest
         from alpaca.data.timeframe import TimeFrame
@@ -257,7 +257,7 @@ class LiveMarketData:
         for i in range(0, len(symbols), 50):
             chunk = symbols[i:i + 50]
             req = StockBarsRequest(symbol_or_symbols=chunk, timeframe=TimeFrame.Day, start=start,
-                                   adjustment=Adjustment.SPLIT, feed=DataFeed.SIP)
+                                   adjustment=Adjustment(adjustment), feed=DataFeed.SIP)
             self.md.limiter.wait()
             df = _retry(lambda: self.md._stock_client().get_stock_bars(req).df)
             for s in chunk:
