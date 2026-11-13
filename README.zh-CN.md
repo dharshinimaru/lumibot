@@ -1,4 +1,4 @@
-<!-- entry-source-sha256: 15415ea6cd94d92e881bb8d161dc7c709dc7d7f7a4a917d0e51898c7a7c9d384 -->
+<!-- entry-source-sha256: 33fe66572f29213275a2589143d0cee366518b359bd073900f8f6a24e5c14a99 -->
 
 # LumiBot AI 交易框架
 
@@ -70,7 +70,7 @@ lumibot connect botspot
 
 LumiSafe 是构建在 LumiBot 之上的可选新手模式,位于 `lumisafe/` 包中。它按简单的指数基金计划投资,让每笔订单都经过固定的安全规则(不用杠杆、不做空、不交易期权;限制单只股票占比和交易频率;对恐慌抛售和追涨设置冷静期),并始终把你的结果与"如果只是持有标普 500"并列展示。它**只使用模拟(paper)账户**交易。
 
-需要 Python 3.10 或更高版本,以及一个免费的 Alpaca **模拟**账户。从克隆到第一笔模拟交易的完整命令(不超过十条)见[英文 LumiSafe 快速入门](README.md#lumisafe-quickstart);之后只需 `lumisafe init`、`lumisafe run-paper` 和 `lumisafe status`。
+需要 Python 3.10 或更高版本,以及一个免费的 Alpaca **模拟**账户。从克隆到第一笔模拟交易的完整命令(不超过十条)见[英文 LumiSafe 快速入门](README.md#lumisafe-quickstart);之后只需 `lumisafe init`、`lumisafe run-paper` 和 `lumisafe status`。`lumisafe next` 会告诉你用自己的钱买什么、何时买;它从不下单。
 
 教育用途软件。不构成金融、税务或法律建议。投资可能亏损。
 <!-- lumisafe:end -->

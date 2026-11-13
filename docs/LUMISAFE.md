@@ -30,6 +30,7 @@ OrderIntent (core | satellite | user)
 | `risk/gate.py`, `risk/limits.py` | R1-R11; property-tested with hypothesis |
 | `risk/kill_switch.py` | Latches the R7 satellite halt until `lumisafe reset-halt satellite` |
 | `portfolio/core.py` | DCA into the most underweight ETF; rebalance sells only beyond the band |
+| `portfolio/advice.py` | Read-only "what to buy next" for the user's own account (`lumisafe next`, dashboard top panel): same allocation and band rules as the core, sale proceeds reinvested, buy day = first NYSE trading day of the month. No broker, no journal, no orders (AST test). |
 | `portfolio/satellite.py` | Runs only registry states in `allowed_states` (P1); per-strategy ledgers; auto-retirement; paper promotion |
 | `promotion/` | Walk-forward (≥ 4 folds, ≥ 8 years, costs 0.10%), criteria, JSON registry state machine |
 | `journal/journal.py` | SQLite triggers forbid UPDATE/DELETE of decisions; fill/shadow fields set once; `events` table for heartbeats, alerts, promotions |

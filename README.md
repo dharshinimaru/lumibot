@@ -265,7 +265,7 @@ lumisafe run-paper
 lumisafe status
 ```
 
-`lumisafe init` asks up to seven plain-English questions and writes your plan to `~/.lumisafe/`. Run `lumisafe run-paper` once a day (or `lumisafe run-paper --loop`). Other commands: `lumisafe today` (daily note), `lumisafe journal`, `lumisafe propose BUY AAPL 3`, `lumisafe strategies`, and the read-only dashboard `streamlit run lumisafe/reporting/dashboard.py`. The optional AI advisor uses `ANTHROPIC_API_KEY` from `.env` if present; model calls may cost money. Design and decisions: [docs/LUMISAFE.md](docs/LUMISAFE.md), [SPEC.md](SPEC.md), [DECISIONS.md](DECISIONS.md).
+`lumisafe init` asks up to seven plain-English questions and writes your plan to `~/.lumisafe/`. Run `lumisafe run-paper` once a day (or `lumisafe run-paper --loop`). To see what to buy with your own money and when, run `lumisafe next --holdings "VTI=10,VXUS=4,BND=1"` (read-only; it never places an order). Other commands: `lumisafe today` (daily note), `lumisafe journal`, `lumisafe propose BUY AAPL 3`, `lumisafe strategies`, and the read-only dashboard `streamlit run lumisafe/reporting/dashboard.py`, which opens with the same "What to buy next" panel. The optional AI advisor uses `ANTHROPIC_API_KEY` from `.env` if present; model calls may cost money. Design and decisions: [docs/LUMISAFE.md](docs/LUMISAFE.md), [SPEC.md](SPEC.md), [DECISIONS.md](DECISIONS.md).
 
 Educational software. Not financial, tax, or legal advice. Investments can lose value.
 <!-- lumisafe:end -->

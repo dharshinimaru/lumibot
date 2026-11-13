@@ -7,7 +7,7 @@ win-rate metric anywhere.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 import pandas as pd
@@ -70,6 +70,17 @@ def load_data(history: Callable[..., dict] = default_history) -> dict[str, Any]:
         except Exception:
             data["headline"] = None
 
+    data["latest_prices"], data["prices_asof"] = {}, None
+    if data["config"] is not None:
+        try:
+            hist = history(sorted(data["config"].core.etfs), datetime.now(timezone.utc) - timedelta(days=14), None)
+            for sym, df in hist.items():
+                if df is not None and len(df):
+                    data["latest_prices"][sym] = float(df["close"].iloc[-1])
+                    data["prices_asof"] = max(filter(None, [data["prices_asof"], df.index[-1]]))
+        except Exception:
+            data["latest_prices"] = {}
+
     alloc = []
     snap, cfg = data["snapshot"], data["config"]
     if snap and cfg:
@@ -95,6 +106,9 @@ def render(st, data: dict[str, Any]) -> None:
     st.title("LumiSafe")
     if data["config"] is None:
         st.info("No plan yet. Run `lumisafe init` in a terminal.")
+    if data["config"] is not None:
+        render_what_to_buy(st, data)
+        st.divider()
     if data["headline"]:
         st.header(data["headline"])
     elif len(data["equity"]) >= 2:
@@ -140,6 +154,55 @@ def render(st, data: dict[str, Any]) -> None:
 
     st.divider()
     st.caption(data["disclaimer"])
+
+
+def render_what_to_buy(st, data: dict[str, Any]) -> None:
+    """Interactive, read-only: type in what you own and what you're adding; see what to buy and when."""
+    from lumisafe.portfolio.advice import what_to_buy, when_text
+
+    core = data["config"].core
+    st.header("What to buy next")
+    st.caption("For your own account. This page never places an order. Your plan: "
+               + " · ".join(f"{w:.0%} {s}" for s, w in core.etfs.items()))
+    prices = data["latest_prices"]
+    if any(prices.get(s, 0) <= 0 for s in core.etfs):
+        st.warning("Couldn't load recent prices right now, so there's no suggestion. Try reloading in a minute.")
+        return
+
+    snap = data["snapshot"] or {}
+    start_from = st.radio("Start from", ["Shares I own (type them below)", "The paper account's holdings"],
+                          horizontal=True, disabled=not snap)
+    use_paper = bool(snap) and start_from.startswith("The paper")
+    cols = st.columns(len(core.etfs) + 1)
+    default_amount = float(core.monthly_contribution_usd or 100.0)
+    amount = cols[0].number_input("Adding now ($)", min_value=0.0, value=default_amount, step=50.0)
+    held = {}
+    for col, sym in zip(cols[1:], core.etfs):
+        paper_qty = float(snap.get("positions", {}).get(sym, 0.0)) if use_paper else 0.0
+        held[sym] = col.number_input(f"{sym} shares owned", min_value=0.0, value=paper_qty, step=1.0,
+                                     disabled=use_paper, key=f"held_{sym}_{use_paper}")
+    whole = st.checkbox("My broker only sells whole shares")
+
+    advice = what_to_buy(core, held, prices, amount, fractional=not whole)
+    asof = data["prices_asof"]
+    if advice.lines:
+        rows = [{"action": l.side.upper(), "fund": l.symbol,
+                 "shares": f"{l.shares:g}" if whole else f"{l.shares:.4f}",
+                 "about": f"${l.dollars:,.2f}",
+                 "your mix now → after": f"{advice.weights_before[l.symbol]:.0%} → {advice.weights_after[l.symbol]:.0%}",
+                 "target": f"{advice.targets[l.symbol]:.0%}"}
+                for l in sorted(advice.lines, key=lambda l: (l.side != "sell", -l.dollars))]
+        st.dataframe(pd.DataFrame(rows), hide_index=True)
+        if advice.leftover >= 0.01:
+            st.write(f"Left over: ${advice.leftover:,.2f}. Keep it for next month.")
+    else:
+        st.write("Nothing to buy with this amount.")
+    st.markdown("**When:** " + when_text(datetime.now(timezone.utc).date()))
+    st.write("Then do nothing until next month. The plan doesn't react to prices going up and down.")
+    for n in advice.notes:
+        st.info(n)
+    if asof is not None:
+        st.caption(f"Prices from the {asof:%b %-d} close; share counts are approximate because prices move.")
 
 
 def main() -> None:  # pragma: no cover - exercised through streamlit's AppTest

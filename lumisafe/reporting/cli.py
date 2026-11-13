@@ -378,6 +378,74 @@ def run_shadow_job(journal: Journal) -> int:
         return 0
 
 
+def latest_closes(symbols) -> tuple[dict[str, float], str]:
+    """Most recent daily close per symbol, and the date it's from."""
+    hist = history_provider(sorted(symbols), datetime.now(timezone.utc) - timedelta(days=14), None)
+    prices, asof = {}, None
+    for sym, df in hist.items():
+        if df is not None and len(df):
+            prices[sym] = float(df["close"].iloc[-1])
+            asof = max(asof, df.index[-1]) if asof is not None else df.index[-1]
+    return prices, (f"{asof:%b %-d}" if asof is not None else "unknown date")
+
+
+@main.command("next")
+@click.option("--amount", type=float, default=None,
+              help="Dollars you're adding now (default: your plan's monthly amount).")
+@click.option("--holdings", default=None, help='Shares you already own, e.g. "VTI=10,VXUS=4,BND=2".')
+@click.option("--paper", "use_paper", is_flag=True, help="Use the paper account's holdings instead.")
+@click.option("--whole-shares", is_flag=True, help="Your broker only sells whole shares.")
+def next_buy(amount, holdings, use_paper, whole_shares):
+    """What to buy, how much, and when. Read-only: it never places an order."""
+    from lumisafe.portfolio.advice import parse_holdings, what_to_buy, when_text
+
+    config = _load_config_or_exit()
+    core = config.core
+    if amount is None:
+        amount = core.monthly_contribution_usd
+        if amount <= 0:
+            click.echo("Your plan invests a lump sum. Say how much with --amount, e.g. `lumisafe next --amount 500`.")
+            sys.exit(1)
+    try:
+        held = parse_holdings(holdings)
+    except ValueError as exc:
+        click.echo(f"--holdings: {exc}")
+        sys.exit(1)
+    source = "the shares you entered" if holdings else "no current holdings (add --holdings to use yours)"
+    if use_paper:
+        snap = _state().get("last_snapshot")
+        if not snap:
+            click.echo("No paper account snapshot yet. Run `lumisafe run-paper` first, or use --holdings.")
+            sys.exit(1)
+        held, source = dict(snap.get("positions", {})), f"your paper account (as of {snap['as_of'][:10]})"
+    try:
+        prices, asof = latest_closes(core.etfs)
+        advice = what_to_buy(core, held, prices, amount, fractional=not whole_shares)
+    except Exception as exc:
+        click.echo(f"Couldn't get prices right now ({exc}). Check your internet connection and try again.")
+        sys.exit(1)
+
+    mix = " · ".join(f"{w:.0%} {s}" for s, w in core.etfs.items())
+    click.echo(f"What to buy next (your plan: {mix})")
+    click.echo(f"Adding ${amount:,.2f} · starting from {source} · prices from the {asof} close\n")
+    if not advice.lines:
+        click.echo("  Nothing to buy with this amount.")
+    for l in sorted(advice.lines, key=lambda l: (l.side != "sell", -l.dollars)):
+        share_fmt = f"{l.shares:g}" if whole_shares else f"{l.shares:.4f}"
+        click.echo(f"  {l.side.upper():<4} {l.symbol:<5} {share_fmt:>9} shares  ≈ ${l.dollars:>9,.2f}   "
+                   f"(share of your funds {advice.weights_before[l.symbol]:.0%} → "
+                   f"{advice.weights_after[l.symbol]:.0%}, target {advice.targets[l.symbol]:.0%})")
+    if advice.leftover >= 0.01 and advice.lines:
+        click.echo(f"  Left over: ${advice.leftover:,.2f} (keep it for next month)")
+    click.echo("\nWhen: " + when_text(datetime.now(timezone.utc).date()))
+    click.echo("Then do nothing until next month. Prices will go up and down; the plan doesn't react to that.")
+    for n in advice.notes:
+        click.echo("Note: " + n)
+    click.echo("Use limit orders near the prices above, or market orders during market hours. "
+               "Prices move, so share counts are approximate.")
+    click.echo("\n" + DISCLAIMER)
+
+
 @main.command()
 def today():
     """A plain-English note about your portfolio today (AI, with an offline fallback)."""
