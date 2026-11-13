@@ -293,7 +293,8 @@ def format_report(d: dict) -> str:
         f"  Slippage                       ${m['slippage']:>12,.2f}",
         f"  Regulatory fees (SEC, FINRA)   ${m['regulatory_fees']:>12,.2f}",
         f"  = Result before tax            ${m['net_before_tax']:>12,.2f}",
-        f"  Income tax (short-term rate)   ${m['income_tax']:>12,.2f}",
+        f"  Income tax (short-term rate)   ${m['income_tax']:>12,.2f}"
+        + ("   (a net loss lowers your other taxes)" if m["income_tax"] > 0 else ""),
         f"  = Result after tax             ${m['net_after_tax']:>12,.2f}",
         f"  Average per trade, before tax  ${s['avg_net_per_trade']:>12,.2f}",
         "",
