@@ -487,6 +487,67 @@ def daytrade_report():
     click.echo("\n" + DISCLAIMER)
 
 
+# --- signal research engine (news + price signals, 5-20 day holds) ------------------------------------
+
+@main.group()
+def signals():
+    """Research engine: test many news and price signals on real data and rank them after costs."""
+
+
+@signals.command("fetch")
+@click.option("--start", default="2016-01-01", show_default=True)
+@click.option("--end", default="2025-12-31", show_default=True)
+def signals_fetch(start, end):
+    """Download every headline for the stock pool plus total-return prices (cached; resumable; ~2 hours)."""
+    from datetime import date as _date
+
+    from lumisafe.daytrade.universe import POOL
+    from lumisafe.signals.fetch import fetch_all_news
+
+    md = _market_data()
+    a, b = _date.fromisoformat(start), _date.fromisoformat(end)
+    md.daily_bars(list(POOL) + ["SPY"], a - timedelta(days=400), b, adjustment="all")
+    n = fetch_all_news(md, a, b, progress=click.echo)
+    click.echo(f"Done: {n} days of headlines. Next: `lumisafe signals study`.")
+
+
+@signals.command("study")
+def signals_study():
+    """Run the pre-registered study, print the ranked results and record the verdict."""
+    import json as _json
+
+    from lumisafe.promotion import apply_backtest
+    from lumisafe.promotion.registry import Registry
+    from lumisafe.promotion.walk_forward import FoldResult, WalkForwardReport
+    from lumisafe.signals.run import STRATEGY_NAME, format_study, run
+
+    d = run(_market_data(), progress=click.echo)
+    now = now_utc()
+    out = paths.reports_dir() / f"signals_{now:%Y%m%d_%H%M%S}.json"
+    out.write_text(_json.dumps(d, indent=2, default=str))
+    wf_d = dict(d["walk_forward"])
+    wf_d["folds"] = [FoldResult(**f) for f in wf_d["folds"]]
+    state = apply_backtest(STRATEGY_NAME, WalkForwardReport(**wf_d), out, Registry(journal=Journal()), now)
+    click.echo("\n" + format_study(d))
+    click.echo(f"\nState: {state.value} · report saved to {out}")
+    click.echo("\n" + DISCLAIMER)
+
+
+@signals.command("report")
+def signals_report():
+    """Show the last signal study."""
+    import json as _json
+
+    from lumisafe.signals.run import format_study
+
+    files = sorted(paths.reports_dir().glob("signals_*.json"))
+    if not files:
+        click.echo("No signal study yet. Run `lumisafe signals fetch`, then `lumisafe signals study`.")
+        sys.exit(1)
+    click.echo(format_study(_json.loads(files[-1].read_text())))
+    click.echo("\n" + DISCLAIMER)
+
+
 @main.command("reset-halt")
 @click.argument("what", type=click.Choice(["satellite"]))
 def reset_halt(what):

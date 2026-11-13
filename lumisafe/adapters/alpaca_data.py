@@ -169,30 +169,30 @@ class AlpacaMarketData:
 
     # -- news ---------------------------------------------------------------------------------
 
-    def news(self, symbols: Iterable[str], day: date, start: datetime, end: datetime) -> list[dict]:
-        """Headlines for ``symbols`` published in [start, end]. Cached per trading day."""
+    def news(self, symbols: Iterable[str], day: date, start: datetime, end: datetime,
+             folder_name: str = "news") -> list[dict]:
+        """Headlines for ``symbols`` published in [start, end]. Cached per trading day.
+
+        One folder per window convention: a cache file only answers requests for the
+        same window it was filled with (``news`` = gap-day mornings, ``news_full`` = whole days).
+        """
         from alpaca.data.requests import NewsRequest
 
-        folder = self.cache / "news"
+        folder = self.cache / folder_name
         folder.mkdir(parents=True, exist_ok=True)
         f = folder / f"{day.isoformat()}.json"
         symbols = sorted(set(symbols))
         cached = json.loads(f.read_text()) if f.is_file() else {"requested": [], "items": []}
         need = [s for s in symbols if s not in cached["requested"]]
         if need:
-            items, token = [], None
-            while True:
-                req = NewsRequest(symbols=",".join(need), start=start, end=end, limit=50, page_token=token,
-                                  exclude_contentless=False)
-                self.limiter.wait()
-                res = _retry(lambda: self._news_client().get_news(req))
-                batch = res.data.get("news", []) if hasattr(res, "data") else getattr(res, "news", [])
-                for n in batch:
-                    items.append({"created_at": n.created_at.isoformat(), "headline": n.headline,
-                                  "source": n.source, "symbols": list(n.symbols)})
-                token = getattr(res, "next_page_token", None)
-                if not token or not batch:
-                    break
+            # limit=None: alpaca-py pages through everything itself (a numeric limit caps the TOTAL;
+            # limit=50 silently returned only the first 50 headlines of a busy day).
+            req = NewsRequest(symbols=",".join(need), start=start, end=end, limit=None, exclude_contentless=False)
+            self.limiter.wait()
+            res = _retry(lambda: self._news_client().get_news(req))
+            batch = res.data.get("news", []) if hasattr(res, "data") else getattr(res, "news", [])
+            items = [{"created_at": n.created_at.isoformat(), "headline": n.headline, "source": n.source,
+                      "symbols": list(n.symbols)} for n in batch]
             known = {(i["created_at"], i["headline"]) for i in cached["items"]}
             cached["items"] += [i for i in items if (i["created_at"], i["headline"]) not in known]
             cached["requested"] = sorted(set(cached["requested"]) | set(need))
@@ -296,17 +296,12 @@ class LiveMarketData:
         symbols = sorted(set(symbols))
         if not symbols:
             return []
-        items, token = [], None
-        while True:
-            req = NewsRequest(symbols=",".join(symbols), start=start, end=end, limit=50, page_token=token)
-            self.md.limiter.wait()
-            res = _retry(lambda: self.md._news_client().get_news(req))
-            batch = res.data.get("news", []) if hasattr(res, "data") else getattr(res, "news", [])
-            items += [{"created_at": n.created_at.isoformat(), "headline": n.headline, "source": n.source,
-                       "symbols": list(n.symbols)} for n in batch]
-            token = getattr(res, "next_page_token", None)
-            if not token or not batch:
-                return items
+        req = NewsRequest(symbols=",".join(symbols), start=start, end=end, limit=None)  # SDK pages itself
+        self.md.limiter.wait()
+        res = _retry(lambda: self.md._news_client().get_news(req))
+        batch = res.data.get("news", []) if hasattr(res, "data") else getattr(res, "news", [])
+        return [{"created_at": n.created_at.isoformat(), "headline": n.headline, "source": n.source,
+                 "symbols": list(n.symbols)} for n in batch]
 
     def spread(self, symbol: str, at: datetime) -> float | None:
         """Median quoted spread / mid over the latest quotes up to ``at`` (real NBBO; None if no quotes)."""
