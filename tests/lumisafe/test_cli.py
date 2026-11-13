@@ -111,6 +111,49 @@ def test_run_paper_uses_paper_runner(runner, monkeypatch):
     assert res.exit_code == 0 and calls == [("paper", True)]
 
 
+def test_run_paper_without_keys_prints_setup_help_not_a_traceback(runner, monkeypatch):
+    from lumisafe.adapters.lumibot_bridge import PaperOnlyError
+
+    def no_keys(cfg, run_once=True):
+        raise PaperOnlyError("ALPACA_API_KEY / ALPACA_API_SECRET are not set (put your PAPER keys in .env).")
+
+    monkeypatch.setattr(cli, "paper_runner", no_keys)
+    runner.invoke(cli.main, ["init"], input=QUIZ_INPUT)
+    for args in (["run-paper"], ["propose", "BUY", "VTI", "1"]):
+        res = runner.invoke(cli.main, args)
+        assert res.exit_code == 1, args
+        assert "Can't start paper trading" in res.output and "ALPACA_IS_PAPER=true" in res.output
+        assert not isinstance(res.exception, PaperOnlyError)  # handled, not a crash
+
+
+def test_run_paper_other_errors_still_surface(runner, monkeypatch):
+    monkeypatch.setattr(cli, "paper_runner", lambda cfg, run_once=True: (_ for _ in ()).throw(ValueError("boom")))
+    runner.invoke(cli.main, ["init"], input=QUIZ_INPUT)
+    res = runner.invoke(cli.main, ["run-paper"])
+    assert isinstance(res.exception, ValueError)
+
+
+def test_run_paper_when_market_closed_says_so_instead_of_complete(runner, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(cli, "paper_runner", lambda cfg, run_once=True: SimpleNamespace(lumisafe_cycle_ran=False))
+    runner.invoke(cli.main, ["init"], input=QUIZ_INPUT)
+    res = runner.invoke(cli.main, ["run-paper"])
+    assert res.exit_code == 0
+    assert "market is closed" in res.output and "Paper cycle complete" not in res.output
+    res = runner.invoke(cli.main, ["propose", "BUY", "VTI", "1"])
+    assert "market is closed" in res.output and "Queued" in res.output
+
+
+def test_run_paper_reports_complete_when_cycle_ran(runner, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(cli, "paper_runner", lambda cfg, run_once=True: SimpleNamespace(lumisafe_cycle_ran=True))
+    runner.invoke(cli.main, ["init"], input=QUIZ_INPUT)
+    res = runner.invoke(cli.main, ["run-paper"])
+    assert "Paper cycle complete" in res.output and "market is closed" not in res.output
+
+
 def test_go_live_command_exists_but_is_not_exercised_here():
     # SPEC §3 rule 2: the agent never runs `lumisafe go-live`. The gate itself is
     # tested directly in test_live_unlock.py.

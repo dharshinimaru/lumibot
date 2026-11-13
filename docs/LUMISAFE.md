@@ -2,7 +2,7 @@
 
 Beginner mode for LumiBot: a guarded, paper-only, benchmark-first layer in the `lumisafe/` package.
 
-- **Last Updated:** 2026-11-12
+- **Last Updated:** 2026-11-13
 - **Status:** Implemented (SPEC.md phases 0-8); paper trading only
 - **Audience:** contributors and AI agents working on `lumisafe/`
 
@@ -41,6 +41,8 @@ OrderIntent (core | satellite | user)
 - **`YahooHelper.get_symbols_data` recurses forever** (defined twice). Use the per-symbol `get_symbol_data`.
 - **Implicit brokers:** importing `lumibot.credentials` with Alpaca keys in `.env` builds a broker and opens a websocket. The bridge sets `LUMIBOT_LAZY_CREDENTIALS=true` and `IS_BACKTESTING=true` during backtests.
 - **Fill price vs decision price:** orders fill at the next price, so the core keeps a 2% cash cushion. Negative cash blocks buys (R3) but never blocks repair sells.
+- **Market closed = no cycle:** LumiBot's one-shot live run (`run_once`) silently skips `on_trading_iteration` while the market is closed. `LumiSafeStrategy` sets `lumisafe_cycle_ran` and the CLI prints a "market is closed, nothing traded" message instead of "Paper cycle complete".
+- **macOS `CERTIFICATE_VERIFY_FAILED` on the Alpaca websocket:** python.org builds ship without CA certificates. REST calls (orders, account) still work and fills are reconciled next cycle; to silence it run `Install Certificates.command` from the Python folder, or `export SSL_CERT_FILE="$(python -m certifi)"`.
 - **Paper fills arrive later:** pending order IDs persist in `~/.lumisafe/state.json` and are reconciled next cycle.
 
 ## State on disk (`~/.lumisafe/`, override with `LUMISAFE_HOME`)

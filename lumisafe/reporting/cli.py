@@ -28,6 +28,31 @@ def paper_runner(config: LumiSafeConfig, run_once: bool = True):
     return run_paper_cycle(config, run_once=run_once)
 
 
+def _run_paper_or_exit(config: LumiSafeConfig, run_once: bool = True):
+    """Run a paper cycle; a setup problem (missing or non-paper keys) is a plain message, not a traceback."""
+    try:
+        return paper_runner(config, run_once=run_once)
+    except Exception as exc:
+        from lumisafe.adapters.lumibot_bridge import PaperOnlyError
+
+        if not isinstance(exc, PaperOnlyError):
+            raise
+        click.echo(f"Can't start paper trading: {exc}")
+        click.echo("Add your Alpaca PAPER keys to a `.env` file in the folder you run lumisafe from:\n"
+                   "  ALPACA_API_KEY=your-paper-key\n  ALPACA_API_SECRET=your-paper-secret\n  ALPACA_IS_PAPER=true")
+        sys.exit(1)
+
+
+MARKET_CLOSED_MSG = ("The market is closed right now, so no paper cycle ran and nothing was traded. "
+                     "Run `lumisafe run-paper` on a weekday between 9:30 and 16:00 New York time, "
+                     "or leave `lumisafe run-paper --loop` running.")
+
+
+def _cycle_ran(result) -> bool:
+    """False only when the paper run reports it skipped the cycle (market closed)."""
+    return getattr(result, "lumisafe_cycle_ran", True) is not False
+
+
 def _load_config_or_exit() -> LumiSafeConfig:
     path = paths.config_path()
     if not path.is_file():
@@ -147,8 +172,11 @@ def run_paper(loop):
     if config.mode != "paper":
         click.echo("Config mode must be `paper`.")
         sys.exit(1)
-    paper_runner(config, run_once=not loop)
+    result = _run_paper_or_exit(config, run_once=not loop)
     run_shadow_job(Journal())
+    if not loop and not _cycle_ran(result):
+        click.echo(MARKET_CLOSED_MSG)
+        return
     click.echo("Paper cycle complete. See `lumisafe status` and `lumisafe journal`.")
 
 
@@ -173,7 +201,10 @@ def _queue_and_run(config: LumiSafeConfig, intent, confirmed: bool) -> None:
     from lumisafe.runner import Inbox
 
     Inbox(paths.inbox_path()).push(intent, confirmed=confirmed)
-    paper_runner(config, run_once=True)
+    result = _run_paper_or_exit(config, run_once=True)
+    if not _cycle_ran(result):
+        click.echo(MARKET_CLOSED_MSG.replace("no paper cycle ran and nothing was traded",
+                                             "your trade wasn't reviewed yet"))
     _print_outcome(intent.intent_id)
 
 

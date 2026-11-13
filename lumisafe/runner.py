@@ -526,8 +526,12 @@ def get_strategy_class():
         def initialize(self, parameters=None):
             self.sleeptime = "1D"
             self._lumisafe = build_engine(self.parameters)
+            # Lumibot's one-shot live run skips on_trading_iteration while the market is
+            # closed; the CLI reads this flag so it never claims a cycle that didn't happen.
+            self.lumisafe_cycle_ran = False
 
         def on_trading_iteration(self):
+            self.lumisafe_cycle_ran = True
             report = self._lumisafe.cycle(self)
             for alert in report.alerts:
                 self.log_message(f"LumiSafe alert: {alert}")

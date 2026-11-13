@@ -275,3 +275,9 @@ Every assumption, deviation and ambiguity resolution made while implementing
 
 ### 2026-11-12 — End-to-end verification fix: `today` loads `.env`
 - Running the real CLI flow (`init` → `run-paper` → `status` → `journal` → `today`) on the Alpaca paper account showed `lumisafe today` falling back to the offline note: on its own the command never loaded `.env`, so `ANTHROPIC_API_KEY` was unseen. The integration test missed it because the paper cycle had already loaded `.env` in the same process. `advisor_factory` now loads `.env` (without overriding shell variables), with a regression test. After the fix, `today` produced a Claude-written note from the real paper account data.
+
+### 2026-11-13 — Fresh-clone readiness check (two UX fixes)
+- Followed the README quickstart from a fresh `git clone -b lumisafe` into a new venv: `pip install -e . -r requirements_lumisafe.txt` succeeds, all unit tests pass, and `init`, `status`, `journal`, `strategies`, `today`, `propose`, `backtest trend_filter` (re-earned REJECTED, same numbers) and the dashboard all work on an empty `LUMISAFE_HOME`.
+- Fix 1: with no Alpaca keys, `run-paper`/`propose` printed a Python traceback. They now print what's missing and the three `.env` lines to add (exit code 1). Other errors still surface unchanged.
+- Fix 2: LumiBot's one-shot live run silently skips the trading iteration while the market is closed, yet the CLI said "Paper cycle complete". `LumiSafeStrategy` now records whether its iteration ran, and the CLI says the market is closed and nothing traded. Fixed inside `lumisafe/`; `lumibot/` untouched.
+- Not re-verified today: a filled paper order (market closed at test time). That path was verified in the 2026-11-12 end-to-end run.
