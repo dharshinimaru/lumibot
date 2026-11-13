@@ -202,7 +202,7 @@ def render_what_to_buy(st, data: dict[str, Any]) -> None:
     for n in advice.notes:
         st.info(n)
     if asof is not None:
-        st.caption(f"Prices from the {asof:%b %-d} close; share counts are approximate because prices move.")
+        st.caption(f"Latest prices from {asof:%b %-d} (during market hours, today's price so far); share counts are approximate because prices move.")
 
 
 def main() -> None:  # pragma: no cover - exercised through streamlit's AppTest

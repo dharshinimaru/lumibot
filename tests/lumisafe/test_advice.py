@@ -113,7 +113,7 @@ def test_cli_next_prints_buys_when_and_disclaimer(plan, monkeypatch):
     assert res.exit_code == 0, res.output
     assert "Adding $100.00" in res.output and "BUY  VXUS" in res.output
     assert "When:" in res.output and DISCLAIMER in res.output
-    assert "Nov 12 close" in res.output
+    assert "latest prices from Nov 12" in res.output
 
 
 def test_cli_next_paper_holdings_and_errors(plan, monkeypatch):

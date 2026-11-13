@@ -379,7 +379,7 @@ def run_shadow_job(journal: Journal) -> int:
 
 
 def latest_closes(symbols) -> tuple[dict[str, float], str]:
-    """Most recent daily close per symbol, and the date it's from."""
+    """Latest daily price per symbol (today's price so far while the market is open) and its date."""
     hist = history_provider(sorted(symbols), datetime.now(timezone.utc) - timedelta(days=14), None)
     prices, asof = {}, None
     for sym, df in hist.items():
@@ -427,7 +427,7 @@ def next_buy(amount, holdings, use_paper, whole_shares):
 
     mix = " · ".join(f"{w:.0%} {s}" for s, w in core.etfs.items())
     click.echo(f"What to buy next (your plan: {mix})")
-    click.echo(f"Adding ${amount:,.2f} · starting from {source} · prices from the {asof} close\n")
+    click.echo(f"Adding ${amount:,.2f} · starting from {source} · latest prices from {asof}\n")
     if not advice.lines:
         click.echo("  Nothing to buy with this amount.")
     for l in sorted(advice.lines, key=lambda l: (l.side != "sell", -l.dollars)):
