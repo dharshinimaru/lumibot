@@ -52,6 +52,7 @@ class AdvisorContext:
     position_weight: float = 0.0
     symbol_history: list[dict] = field(default_factory=list)  # this symbol's recent journal decisions
     headlines: list[str] = field(default_factory=list)
+    kind: str = "invest"  # "intraday" for the paper day-trading lab (uses its own review prompt)
 
     def to_prompt_dict(self) -> dict:
         return {
@@ -126,8 +127,9 @@ class AIAdvisor:
             if self._llm is None or context is None:
                 raise RuntimeError("no advisor client or context")
             user = prompts.review_user_prompt(context.to_prompt_dict())
+            system = prompts.INTRADAY_REVIEW_SYSTEM if context.kind == "intraday" else prompts.REVIEW_SYSTEM
             raw = _call_with_timeout(
-                lambda: self._llm.complete(prompts.REVIEW_SYSTEM, user, json_schema=json_schema(),
+                lambda: self._llm.complete(system, user, json_schema=json_schema(),
                                            timeout=self.timeout_s),
                 self.timeout_s,
             )

@@ -25,6 +25,7 @@ from lumisafe import paths
 from lumisafe.adapters import lumibot_bridge as bridge
 from lumisafe.coach.behavior import BehaviorCoach, MarketContext, PendingStore
 from lumisafe.config.schema import LumiSafeConfig
+from lumisafe.daytrade import INTRADAY_STRATEGIES
 from lumisafe.journal.journal import (
     PAPER_CYCLE_EVENT, Journal, JournalEntry, intent_from_dict, intent_to_dict, new_entry_id,
 )
@@ -112,6 +113,7 @@ class PipelineContext:
     market: Any = None
     recent_sales: list[JournalEntry] = field(default_factory=list)
     advisor_context: Any = None
+    bracket: tuple[float, float] | None = None  # (stop, take-profit) for day-trading lab entries
 
 
 class Pipeline:
@@ -166,8 +168,13 @@ class Pipeline:
                 else:  # pragma: no cover - gate only returns the three verdicts
                     final = Verdict.BLOCK
             if final in (Verdict.APPROVE, Verdict.RESIZE):
+                bracket = ctx.bracket if intent.side is Side.BUY else None
+                if bracket is not None and not float(qty).is_integer():
+                    qty = float(int(qty))  # brackets need whole shares; never round up
+                if bracket is not None and qty < 1:
+                    raise ValueError("a bracket order needs at least one whole share")
                 order_id = bridge.submit(executor, intent.symbol, Side(intent.side).value, qty,
-                                         reason=clip_explanation(intent.reason))
+                                         reason=clip_explanation(intent.reason), bracket=bracket)
         except Exception as exc:  # anything unexpected → nothing submitted, journal says why
             order_id = None
             final = Verdict.BLOCK
@@ -214,7 +221,7 @@ class Engine:
         self.journal = journal
         self.state = state
         self.core = CoreIndexStrategy(config.core, fractional=fractional)
-        self.gate = RiskGate(config.risk, self.core.symbols)
+        self.gate = RiskGate(config.risk, self.core.symbols, intraday_strategies=INTRADAY_STRATEGIES)
         self.kill_switch = KillSwitch(config.risk, state.get("kill_switch"))
         self.lots = LotBook.from_list(state.get("lots"))
         self.satellite = satellite
@@ -277,7 +284,8 @@ class Engine:
     def trades_this_week(self, as_of: datetime) -> int:
         """Submitted satellite + user trades since Monday. Core trades are exempt from R5."""
         since = week_start(as_of)
-        return sum(1 for e in self.journal.query(since=since, submitted=True) if e.intent.source is not Source.CORE)
+        return sum(1 for e in self.journal.query(since=since, submitted=True)
+                   if e.intent.source is not Source.CORE and e.intent.strategy_name not in INTRADAY_STRATEGIES)
 
     def symbols(self) -> set[str]:
         syms = set(self.core.symbols) | {l.symbol for l in self.lots.lots}
@@ -322,7 +330,8 @@ class Engine:
             positions[i.symbol] = positions.get(i.symbol, 0.0) + outcome.executed_qty
         else:
             positions[i.symbol] = positions.get(i.symbol, 0.0) - outcome.executed_qty
-        trades = snap.trades_this_week + (0 if i.source is Source.CORE else 1)
+        trades = snap.trades_this_week + (0 if i.source is Source.CORE or i.strategy_name in INTRADAY_STRATEGIES
+                                          else 1)
         return replace(snap, cash=max(cash, 0.0), positions=positions, trades_this_week=trades)
 
     def context_for(self, intent: OrderIntent, snap: PortfolioSnapshot, executor: Any) -> PipelineContext:
@@ -507,6 +516,7 @@ def assemble_engine(config: LumiSafeConfig, journal: Journal, state: StateStore,
         history_fn=history_fn if history_fn is not None else (yahoo_closes if mode == "paper" else None),
     )
     engine.pipeline.tax = TaxGuard(core_symbols, min_holding_days=config.risk.min_holding_days,
+                                   intraday_strategies=INTRADAY_STRATEGIES,
                                    realized_pnl=engine.realized_pnl)
     engine.tax = engine.pipeline.tax
     if engine.satellite is None and mode == "paper":
@@ -588,3 +598,302 @@ def run_paper_cycle(config: LumiSafeConfig, engine_factory=None, run_once: bool 
     params = strategy_parameters(config, journal_path=paths.journal_path(), state_path=paths.state_path(),
                                  mode="paper", engine_factory=engine_factory)
     return bridge.run_paper(get_strategy_class(), params, run_once=run_once)
+
+
+# --- day-trading lab: paper only (owner-approved SPEC amendment, 2026-11-13) ---------------------------
+
+DAYTRADE_BOOK_KEY = "daytrade_book"
+DAYTRADE_PEAK_KEY = "daytrade_peak_equity"
+
+
+class DayTradeRunner:
+    """One minute of paper day trading: sync fills, enforce the daily stop and the close, take new entries.
+
+    Every entry and every exit goes through the same Pipeline (tax → AI veto → RiskGate → submit →
+    journal) as SATELLITE intents tagged ``INTRADAY_STRATEGY``. Entries are bracket orders, so the stop
+    and take-profit live at the broker even if this process stops.
+    """
+
+    def __init__(self, config: LumiSafeConfig, journal: Journal, state: StateStore, live, params, *,
+                 advisor=None, costs=None, session_fn: Callable | None = None):
+        from lumisafe.daytrade import INTRADAY_STRATEGY
+        from lumisafe.daytrade.sim import Costs
+
+        self.config, self.cfg = config, config.daytrade
+        self.journal, self.state, self.live, self.params = journal, state, live, params
+        self.costs = costs or Costs()
+        self.strategy_name = INTRADAY_STRATEGY
+        core = set(config.core.etfs)
+        gate = RiskGate(config.risk, core, intraday_strategies=INTRADAY_STRATEGIES)
+        tax = TaxGuard(core, min_holding_days=config.risk.min_holding_days, intraday_strategies=INTRADAY_STRATEGIES)
+        self.pipeline = Pipeline(journal, gate, tax=tax, advisor=advisor)
+        self.session_fn = session_fn or _session_for
+        self.setups: list | None = None
+        self.setups_day: str | None = None
+        self.headlines: dict[str, list[str]] = {}
+        import threading
+
+        self._lock = threading.RLock()  # Lumibot reports fills on another thread
+
+    # -- book ----------------------------------------------------------------------------------------
+
+    def _book(self, today, slice_equity: float):
+        from lumisafe.daytrade.live import DayBook
+
+        return DayBook.for_today(self.state.get(DAYTRADE_BOOK_KEY), today, slice_equity)
+
+    def _save(self, book) -> None:
+        self.state.set(DAYTRADE_BOOK_KEY, book.to_dict())
+        self.state.save()
+
+    def _snapshot(self, acct, book) -> PortfolioSnapshot:
+        slice_now = book.start_equity + book.realized + book.unrealized(acct.prices)
+        peak = max(float(self.state.get(DAYTRADE_PEAK_KEY, 0.0)), slice_now)
+        self.state.set(DAYTRADE_PEAK_KEY, peak)
+        return PortfolioSnapshot(as_of=acct.as_of, cash=acct.cash, equity=acct.equity,
+                                 positions=dict(acct.positions), prices=dict(acct.prices),
+                                 peak_equity=max(float(self.state.get("peak_equity", 0.0)), acct.equity),
+                                 satellite_equity=slice_now, satellite_peak_equity=peak,
+                                 satellite_day_start_equity=book.start_equity, trades_this_week=0, lots=[])
+
+    def _intent(self, symbol: str, side: Side, qty: float, reason: str, at: datetime) -> OrderIntent:
+        import uuid
+
+        return OrderIntent(intent_id=str(uuid.uuid4()), created_at=at, source=Source.SATELLITE, symbol=symbol,
+                           side=side, quantity=float(qty), reason=reason, strategy_name=self.strategy_name)
+
+    # -- one minute -------------------------------------------------------------------------------------
+
+    def tick(self, executor: Any) -> list[str]:
+        with self._lock:
+            return self._tick(executor)
+
+    def _tick(self, executor: Any) -> list[str]:
+        from lumisafe.daytrade.live import entry_block_reason, live_candidates, should_halt
+        from lumisafe.daytrade.sim import DayResult, prepare, size_position
+
+        msgs: list[str] = []
+        saved = self.state.get(DAYTRADE_BOOK_KEY) or {}
+        symbols = set((saved.get("positions") or {}).keys()) | {s.symbol for s in (self.setups or [])}
+        acct = bridge.account_state(executor, symbols)
+        now = acct.as_of
+        sess = self.session_fn(now.date())
+        if sess is None:
+            return ["market closed today"]
+        book = self._book(now.date(), self.cfg.slice_fraction * acct.equity)
+        self._sync_closed(book, acct, now)
+        prices = acct.prices
+        decision = sess.open + timedelta(minutes=15)
+        entry_until = sess.open + timedelta(minutes=self.params.entry_until_minutes)
+        flat_at = sess.close - timedelta(minutes=self.params.flat_minutes)
+
+        if book.positions and not book.halted and should_halt(book, self.cfg, prices):
+            book.halted = True
+            msgs.append(f"daily loss limit hit ({self.cfg.daily_loss_halt:.0%} of the slice): selling everything")
+            self.journal.record_event("daytrade_halt", {"realized": book.realized,
+                                                        "open": book.unrealized(prices)}, ts=now)
+            self._flatten(executor, book, acct, "daily loss limit reached", now)
+        if now >= flat_at and not book.flattened:
+            if book.positions:
+                msgs.append("closing time: selling every day trade")
+                self._flatten(executor, book, acct, "end of day: day trades are never held overnight", now)
+            book.flattened = True
+
+        if decision <= now < entry_until and self.setups_day != book.day:
+            prev_close = self.session_fn(now.date(), previous=True)
+            cands, bars = live_candidates(self.live, sess, now, prev_close.close if prev_close else
+                                          sess.open - timedelta(hours=17, minutes=30))
+            res = DayResult(book.day)
+            self.setups = prepare(cands, bars, self.params, res)
+            self.setups_day = book.day
+            self.headlines = {c.symbol: [h["headline"] for h in c.headlines][-5:] for c in cands}
+            self.journal.record_event("daytrade_scan", {"candidates": [c.symbol for c in cands],
+                                                        "setups": [s.symbol for s in self.setups],
+                                                        "skipped": res.skipped}, ts=now)
+            msgs.append(f"scan: {len(cands)} gap-ups with news, {len(self.setups)} pass the filters")
+
+        if self.setups and self.setups_day == book.day and not book.halted and now < entry_until:
+            for s in self.setups:
+                if s.symbol in book.attempted:
+                    continue
+                px = bridge.last_price(executor, s.symbol)
+                if px is None or px < s.trigger:
+                    continue
+                entry = px * (1 + s.half_spread)
+                slice_now = book.start_equity + book.realized + book.unrealized(prices)
+                z = size_position(entry, s.or_low, s.half_spread, self.params, self.cfg, self.costs, slice_now,
+                                  slice_now - book.open_value(prices), float(s.bars["volume"].iloc[-1]))
+                why = z.reason or entry_block_reason(book, self.cfg, s.symbol, z.shares, entry, now=now,
+                                                      entry_until=entry_until, flat_at=flat_at,
+                                                      account_equity=acct.equity, prices=prices)
+                book.attempted.append(s.symbol)  # one attempt per stock per day, whatever the outcome
+                if why:
+                    self.journal.record_event("daytrade_skip", {"symbol": s.symbol, "why": why}, ts=now)
+                    continue
+                msgs.append(self._enter(executor, book, acct, s, z, entry, now))
+        self._save(book)
+        return [m for m in msgs if m]
+
+    def _enter(self, executor, book, acct, s, z, entry, now) -> str:
+        from lumisafe.advisor.advisor import AdvisorContext
+        from lumisafe.daytrade.live import LivePosition
+
+        reason = (f"Day trade: {s.symbol} gapped up on news and broke its opening range; stop "
+                  f"${z.stop:,.2f}, target ${z.target:,.2f}, sold by the close.")
+        intent = self._intent(s.symbol, Side.BUY, z.shares, reason, now)
+        ctx = PipelineContext(
+            advisor_context=AdvisorContext(
+                symbol=s.symbol, side="buy", quantity=float(z.shares), source="satellite", reason=reason,
+                recent_closes=[float(x) for x in s.bars["close"].tail(20)],
+                position_qty=float(acct.positions.get(s.symbol, 0.0)), headlines=self.headlines.get(s.symbol, []),
+                kind="intraday"),
+            bracket=(z.stop, z.target))
+        snap = self._snapshot(acct, book)
+        snap = replace(snap, prices={**snap.prices, s.symbol: entry})
+        out = self.pipeline.run(intent, snap, executor, ctx)
+        if not out.submitted:
+            return f"{s.symbol}: not traded ({out.entry.final.value}: {out.entry.reviews[-1].explanation})"
+        book.positions[s.symbol] = LivePosition(s.symbol, int(out.executed_qty), entry, z.stop, z.target,
+                                                out.order_id, now.isoformat())
+        book.trades += 1
+        return f"{s.symbol}: bought {int(out.executed_qty)} near ${entry:,.2f} (stop ${z.stop:,.2f}, target ${z.target:,.2f})"
+
+    def _flatten(self, executor, book, acct, why: str, now) -> None:
+        for sym, p in list(book.positions.items()):
+            bridge.cancel_open_orders(executor, sym)
+            held = float(acct.positions.get(sym, 0.0))
+            qty = min(float(p.shares), held)
+            if qty <= 0:
+                continue
+            out = self.pipeline.run(self._intent(sym, Side.SELL, qty, f"Day trade exit: {why}.", now),
+                                    self._snapshot(acct, book), executor, PipelineContext())
+            if not out.submitted:
+                self.journal.record_event("daytrade_exit_blocked", {"symbol": sym, "why": out.entry.final.value},
+                                          ts=now)
+
+    def _sync_closed(self, book, acct, now) -> None:
+        """A bracket leg (stop/target) closed a position while we weren't looking: book it at the last price."""
+        for sym, p in list(book.positions.items()):
+            if p.filled and float(acct.positions.get(sym, 0.0)) <= 0:
+                price = acct.prices.get(sym)
+                if price is None:
+                    continue
+                self._book_exit(book, p, price, p.shares, now, note="fill price not reported; last price used")
+
+    def _book_exit(self, book, p, price: float, qty: float, at, note: str | None = None) -> None:
+        fees = self.costs.sell_fees(int(qty), price)
+        pnl = qty * (price - p.entry) - fees
+        book.realized += pnl
+        p.shares = int(p.shares - qty)
+        if p.shares <= 0:
+            book.positions.pop(p.symbol, None)
+        self.journal.record_event("daytrade_exit", {"symbol": p.symbol, "qty": qty, "entry": p.entry,
+                                                    "exit": price, "fees": fees, "pnl": pnl, "note": note}, ts=at)
+
+    def on_fill(self, order_id: str, symbol: str, side: str, price: float, qty: float, at: datetime) -> None:
+        with self._lock:
+            self._on_fill(order_id, symbol, side, price, qty, at)
+
+    def _on_fill(self, order_id: str, symbol: str, side: str, price: float, qty: float, at: datetime) -> None:
+        saved = self.state.get(DAYTRADE_BOOK_KEY)
+        if not saved:
+            return
+        from lumisafe.daytrade.live import DayBook
+
+        book = DayBook.from_dict(saved)
+        p = book.positions.get(symbol)
+        if p is None:
+            return
+        if side == "buy" and not p.filled:
+            p.entry, p.filled = float(price), True
+            self.journal.record_event("daytrade_entry_fill", {"symbol": symbol, "qty": qty, "price": price}, ts=at)
+        elif side == "sell":
+            self._book_exit(book, p, float(price), float(qty), at)
+        self._save(book)
+
+
+def _session_for(day, previous: bool = False):
+    from datetime import timedelta as _td
+
+    from lumisafe.daytrade.universe import sessions
+
+    if previous:
+        prior = sessions(day - _td(days=10), day - _td(days=1))
+        return prior[-1] if prior else None
+    s = sessions(day, day)
+    return s[0] if s else None
+
+
+_DAYTRADE_CLASS = None
+
+
+def build_daytrade_runner(params: dict) -> DayTradeRunner:
+    from lumisafe.adapters.alpaca_data import AlpacaMarketData, LiveMarketData
+    from lumisafe.daytrade.sim import Params
+
+    config = LumiSafeConfig.model_validate(params["lumisafe_config"])
+    journal = Journal(params["journal_path"])
+    state = StateStore(params.get("state_path"))
+    factory = params.get("runner_factory")
+    if factory is not None:
+        return factory(config, journal, state, params)
+    from lumisafe.advisor.advisor import AIAdvisor, AnthropicLLMClient
+
+    advisor = AIAdvisor(AnthropicLLMClient() if config.ai_enabled else None, enabled=config.ai_enabled)
+    return DayTradeRunner(config, journal, state, LiveMarketData(AlpacaMarketData()),
+                          Params(**params["daytrade_params"]), advisor=advisor)
+
+
+def get_daytrade_strategy_class():
+    """LumiSafeDayTrade(lumibot Strategy): one tick per minute during market hours."""
+    global _DAYTRADE_CLASS
+    if _DAYTRADE_CLASS is not None:
+        return _DAYTRADE_CLASS
+    Base = bridge.strategy_base()
+
+    class LumiSafeDayTrade(Base):
+        def initialize(self, parameters=None):
+            self.sleeptime = "1M"
+            self._daytrade = build_daytrade_runner(self.parameters)
+
+        def on_trading_iteration(self):
+            for m in self._daytrade.tick(self):
+                self.log_message(f"LumiSafe day trade: {m}")
+
+        def on_filled_order(self, position, order, price, quantity, multiplier):
+            asset = getattr(order, "asset", None)
+            side = str(getattr(order, "side", "")).lower()
+            self._daytrade.on_fill(bridge.order_id(order), getattr(asset, "symbol", ""),
+                                   "buy" if "buy" in side else "sell", float(price), float(quantity),
+                                   self.get_datetime())
+
+    _DAYTRADE_CLASS = LumiSafeDayTrade
+    return LumiSafeDayTrade
+
+
+class DayTradeNotAllowed(RuntimeError):
+    pass
+
+
+def daytrade_allowed(config: LumiSafeConfig, registry_state: str | None, params) -> str | None:
+    """Why paper day trading may NOT start (P1 + the owner's switch), or None."""
+    if not config.daytrade.enabled:
+        return "Day trading is off. Turn it on with `lumisafe daytrade enable` (paper only)."
+    if registry_state not in config.daytrade.allowed_states:
+        return (f"The day-trading strategy is {registry_state or 'not tested yet'}; only "
+                f"{' / '.join(config.daytrade.allowed_states)} strategies may trade (SPEC §8, P1). "
+                "See `lumisafe daytrade report`.")
+    if params is None:
+        return "No tested parameters found. Run `lumisafe daytrade backtest` first."
+    return None
+
+
+def run_daytrade_paper(config: LumiSafeConfig, registry_state: str | None, params) -> Any:
+    why = daytrade_allowed(config, registry_state, params)
+    if why:
+        raise DayTradeNotAllowed(why)
+    from dataclasses import asdict as _asdict
+
+    p = {"lumisafe_config": config.model_dump(mode="json"), "journal_path": str(paths.journal_path()),
+         "state_path": str(paths.state_path()), "mode": "paper", "daytrade_params": _asdict(params)}
+    return bridge.run_paper(get_daytrade_strategy_class(), p, run_once=False, name="LumiSafeDayTrade")

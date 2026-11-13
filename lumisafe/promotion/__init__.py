@@ -24,7 +24,12 @@ def backtest_and_promote(name: str, strategy_cls, history, registry: Registry, *
                           first_train_start=first_train_start, now=now)
     out = Path(reports_dir or paths.reports_dir()) / f"walk_forward_{name}_{now:%Y%m%d_%H%M%S}.json"
     report.save(out)
+    return report, out, apply_backtest(name, report, out, registry, now)
 
+
+def apply_backtest(name: str, report: WalkForwardReport, out: Path, registry: Registry, now: datetime) -> State:
+    """Move ``name`` through DRAFT → BACKTESTED → PAPER/REJECTED from a saved walk-forward report."""
+    registry.register(name, at=now)
     state = registry.state(name)
     if state is State.DRAFT:
         valid = criteria.backtest_is_valid(report)
@@ -40,4 +45,4 @@ def backtest_and_promote(name: str, strategy_cls, history, registry: Registry, *
             registry.transition(name, State.REJECTED, d.metrics, d.reasons, at=now, last_report=str(out),
                                 backtest_metrics=d.metrics)
         state = registry.state(name)
-    return report, out, state
+    return state

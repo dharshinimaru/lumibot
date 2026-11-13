@@ -327,6 +327,166 @@ def backtest(strategy):
     click.echo(f"Report saved to {path}")
 
 
+# --- day-trading lab (paper only; owner-approved SPEC amendment, see DECISIONS.md) ---------------------
+
+@main.group()
+def daytrade():
+    """Paper-only day-trading lab: download data, test it honestly against SPY, then paper-trade if it passes."""
+
+
+def _market_data():
+    from lumisafe.adapters import lumibot_bridge as bridge
+    from lumisafe.adapters.alpaca_data import AlpacaMarketData
+
+    bridge.load_dotenv_file(".env")
+    return AlpacaMarketData()
+
+
+@daytrade.command("fetch")
+@click.option("--start", default="2016-01-04", show_default=True)
+@click.option("--end", default="2025-12-31", show_default=True)
+def daytrade_fetch(start, end):
+    """Download minute prices, headlines and bid/ask quotes (cached; resumes where it stopped; ~2-3 hours)."""
+    from datetime import date as _date
+
+    from lumisafe.daytrade import dataset
+
+    try:
+        cands = dataset.build(_market_data(), _date.fromisoformat(start), _date.fromisoformat(end),
+                              progress=click.echo)
+    except RuntimeError as exc:
+        click.echo(str(exc))
+        sys.exit(1)
+    click.echo(f"Done: {len(cands)} candidate trades-days. Next: `lumisafe daytrade backtest`.")
+
+
+@daytrade.command("backtest")
+@click.option("--start", default="2016-01-04", show_default=True)
+@click.option("--end", default="2025-12-31", show_default=True)
+def daytrade_backtest(start, end):
+    """Test the lab on the downloaded years after every cost and tax, and record the verdict."""
+    import json as _json
+    from datetime import date as _date
+
+    from lumisafe.daytrade.lab import run_backtest
+    from lumisafe.daytrade.report import format_report
+    from lumisafe.promotion.registry import Registry
+
+    config = load_config(paths.config_path()) if paths.config_path().is_file() else None
+    cfg = config.daytrade if config else LumiSafeConfig.model_fields["daytrade"].default
+    try:
+        report, path, state = run_backtest(_market_data(), cfg, Registry(journal=Journal()),
+                                           start=_date.fromisoformat(start), end=_date.fromisoformat(end),
+                                           now=now_utc(), progress=click.echo)
+    except RuntimeError as exc:
+        click.echo(str(exc))
+        sys.exit(1)
+    click.echo("\n" + format_report(_json.loads(path.read_text())))
+    click.echo(f"\nState: {state} · report saved to {path}")
+    click.echo("\n" + DISCLAIMER)
+
+
+def _set_daytrade_enabled(on: bool) -> None:
+    config = _load_config_or_exit()
+    config.daytrade.enabled = on
+    save_config(config, paths.config_path())
+
+
+@daytrade.command("enable")
+def daytrade_enable():
+    """Turn the paper day-trading lab on (it still trades only if its test passed)."""
+    _set_daytrade_enabled(True)
+    click.echo("Day trading is ON for paper trading only. It trades only if `lumisafe daytrade report` says it "
+               "passed; start it with `lumisafe daytrade run` during market hours.")
+
+
+@daytrade.command("disable")
+def daytrade_disable():
+    """Turn the paper day-trading lab off."""
+    _set_daytrade_enabled(False)
+    click.echo("Day trading is OFF.")
+
+
+def daytrade_runner(config, state, params):  # indirection for tests
+    from lumisafe.runner import run_daytrade_paper
+
+    from lumisafe.adapters import lumibot_bridge as bridge
+
+    bridge.load_dotenv_file(".env")
+    return run_daytrade_paper(config, state, params)
+
+
+@daytrade.command("run")
+def daytrade_run():
+    """Paper day trading, one check per minute during market hours (Ctrl-C to stop)."""
+    from lumisafe.daytrade import INTRADAY_STRATEGY
+    from lumisafe.daytrade.lab import latest_report
+    from lumisafe.daytrade.live import params_from_report
+    from lumisafe.promotion.registry import Registry
+    from lumisafe.runner import DayTradeNotAllowed, daytrade_allowed
+
+    config = _load_config_or_exit()
+    st = Registry().state(INTRADAY_STRATEGY)
+    params = params_from_report(latest_report())
+    why = daytrade_allowed(config, st.value if st else None, params)
+    if why:
+        click.echo(why)
+        sys.exit(1)
+    click.echo(f"Paper day trading with: {params.label()}. Ctrl-C to stop.")
+    try:
+        daytrade_runner(config, st.value, params)
+    except DayTradeNotAllowed as exc:
+        click.echo(str(exc))
+        sys.exit(1)
+
+
+@daytrade.command("status")
+def daytrade_status():
+    """Today's day trades: open positions, result so far, limits."""
+    from lumisafe.daytrade import INTRADAY_STRATEGY
+    from lumisafe.promotion.registry import Registry
+    from lumisafe.runner import DAYTRADE_BOOK_KEY
+
+    config = _load_config_or_exit()
+    st = Registry().state(INTRADAY_STRATEGY)
+    cfg = config.daytrade
+    click.echo(f"Day-trading lab: {'ON' if cfg.enabled else 'OFF'} · strategy state "
+               f"{st.value if st else 'not tested yet'} · slice {cfg.slice_fraction:.0%} of the account · "
+               f"daily loss limit {cfg.daily_loss_halt:.0%} of the slice")
+    book = _state().get(DAYTRADE_BOOK_KEY)
+    if not book:
+        click.echo("No day trades yet.")
+    else:
+        click.echo(f"{book['day']}: {book['trades']} trade(s) · result so far ${book['realized']:,.2f} (closed trades)"
+                   + (" · STOPPED for the day (loss limit)" if book.get("halted") else ""))
+        for sym, p in book.get("positions", {}).items():
+            click.echo(f"  holding {p['shares']} {sym} from ${p['entry']:,.2f} · stop ${p['stop']:,.2f} · "
+                       f"target ${p['target']:,.2f}")
+        day_start = datetime.fromisoformat(book["day"]).replace(tzinfo=timezone.utc) - timedelta(hours=12)
+        exits = Journal().events(kind="daytrade_exit", since=day_start)
+        for e in exits:
+            p = e.payload
+            click.echo(f"  sold {p['qty']:g} {p['symbol']} at ${p['exit']:,.2f} (bought ${p['entry']:,.2f}) → "
+                       f"${p['pnl']:+,.2f} after fees" + (f" [{p['note']}]" if p.get("note") else ""))
+    click.echo("\n" + DISCLAIMER)
+
+
+@daytrade.command("report")
+def daytrade_report():
+    """Show the last day-trading lab report."""
+    import json as _json
+
+    from lumisafe.daytrade.lab import latest_report
+    from lumisafe.daytrade.report import format_report
+
+    path = latest_report()
+    if path is None:
+        click.echo("No day-trading report yet. Run `lumisafe daytrade fetch`, then `lumisafe daytrade backtest`.")
+        sys.exit(1)
+    click.echo(format_report(_json.loads(path.read_text())))
+    click.echo("\n" + DISCLAIMER)
+
+
 @main.command("reset-halt")
 @click.argument("what", type=click.Choice(["satellite"]))
 def reset_halt(what):

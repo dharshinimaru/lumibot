@@ -50,6 +50,29 @@ class RiskConfig(BaseModel):
     allow_options: Literal[False] = False
 
 
+class DayTradeConfig(BaseModel):
+    """Paper-only intraday lab (owner-approved amendment to SPEC §2, 2026-11-13; see DECISIONS.md).
+
+    Long only, no leverage (inherits C1), every position closed before the
+    close. Its own limits replace the 5-trades-a-week cap and the 5-day minimum
+    hold for this slice only; the rest of the account keeps the SPEC rules.
+    """
+
+    model_config = _STRICT
+
+    enabled: bool = False
+    slice_fraction: float = Field(0.10, gt=0, le=0.25)  # share of account equity the lab may use
+    daily_loss_halt: float = Field(0.01, gt=0, le=0.03)  # stop for the day after losing this much of the slice
+    risk_per_trade: float = Field(0.0025, gt=0, le=0.01)  # loss at the stop, as a share of the slice
+    max_position_fraction: float = Field(0.34, gt=0, le=0.5)  # one position's value, share of the slice
+    max_positions: int = Field(3, ge=1, le=5)
+    max_trades_per_day: int = Field(6, ge=1, le=20)
+    account_type: Literal["margin", "cash"] = "margin"  # Alpaca paper accounts are margin accounts
+    short_term_tax_rate: float = Field(0.30, ge=0, le=0.60)  # your marginal rate incl. state; for after-tax figures
+    long_term_tax_rate: float = Field(0.15, ge=0, le=0.40)
+    allowed_states: list[str] = ["PAPER", "LIVE_ELIGIBLE"]
+
+
 class LumiSafeConfig(BaseModel):
     model_config = _STRICT
 
@@ -57,6 +80,7 @@ class LumiSafeConfig(BaseModel):
     core: CoreConfig
     satellite: SatelliteConfig = SatelliteConfig()
     risk: RiskConfig = RiskConfig()
+    daytrade: DayTradeConfig = DayTradeConfig()
     benchmark: str = "SPY"
     ai_enabled: bool = True
 

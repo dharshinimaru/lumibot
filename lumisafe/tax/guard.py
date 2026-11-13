@@ -37,8 +37,10 @@ def _explain(text: str) -> str:
 
 class TaxGuard:
     def __init__(self, core_symbols: set[str], *, short_term_rate: float = 0.32, long_term_rate: float = 0.15,
-                 min_holding_days: int = 5, realized_pnl: Callable[[str], float | None] | None = None):
+                 min_holding_days: int = 5, realized_pnl: Callable[[str], float | None] | None = None,
+                 intraday_strategies: frozenset[str] = frozenset()):
         self.core_symbols = frozenset(core_symbols)
+        self.intraday_strategies = frozenset(intraday_strategies)  # wash sales WARN (cost is in the lab's numbers)
         self.short_term_rate = short_term_rate
         self.long_term_rate = long_term_rate
         self.min_holding_days = min_holding_days
@@ -74,6 +76,10 @@ class TaxGuard:
             if loss is None or loss >= 0:
                 continue
             when = sale.ts.strftime("%b %d")
+            if intent.source is Source.SATELLITE and intent.strategy_name in self.intraday_strategies:
+                return ReviewResult(REVIEWER, Verdict.WARN, _explain(
+                    f"{intent.symbol} was sold at a loss on {when}; this day trade makes it a wash sale, so that "
+                    "loss moves into this trade's cost instead of counting now."))
             if intent.source is Source.CORE:
                 return ReviewResult(REVIEWER, Verdict.WARN, _explain(
                     f"{intent.symbol} was sold at a loss on {when}; buying it back within 30 days can be a wash "

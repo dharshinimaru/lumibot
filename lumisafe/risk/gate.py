@@ -25,9 +25,15 @@ def _block(text: str) -> ReviewResult:
 
 
 class RiskGate:
-    def __init__(self, config: RiskConfig, core_symbols: set[str]):
+    def __init__(self, config: RiskConfig, core_symbols: set[str], intraday_strategies: frozenset[str] = frozenset()):
         self.config = config
         self.core_symbols = frozenset(core_symbols)
+        # Paper-only intraday satellite strategies (owner-approved SPEC amendment, 2026-11-13). Only these
+        # named strategies skip R5 and R9; they have their own per-day limits (lumisafe/daytrade/gate.py).
+        self.intraday_strategies = frozenset(intraday_strategies)
+
+    def _intraday(self, intent: OrderIntent) -> bool:
+        return intent.source is Source.SATELLITE and intent.strategy_name in self.intraday_strategies
 
     # -- public contract --------------------------------------------------------------
 
@@ -72,7 +78,10 @@ class RiskGate:
         is_core_symbol = sym in self.core_symbols
         account_alert = limits.account_drawdown_alert(snap, cfg)
 
-        if src is Source.SATELLITE:
+        # R6/R7 stop NEW satellite risk. An intraday strategy's SELL only closes a same-day position;
+        # blocking it would force an overnight hold, which that slice forbids, so it passes.
+        closing_intraday = self._intraday(intent) and intent.side is Side.SELL
+        if src is Source.SATELLITE and not closing_intraday:
             if limits.satellite_drawdown_halt(snap, cfg):  # R7
                 return _block(
                     f"Satellite is down {cfg.satellite_drawdown_halt:.0%}+ from its peak. Satellite trading "
@@ -92,7 +101,8 @@ class RiskGate:
                     f"Your account is down {cfg.account_drawdown_alert:.0%}+ from its peak. LumiSafe never "
                     f"sells core holdings like {sym} in a drawdown; that is when selling hurts most."
                 )
-            if src is not Source.CORE:  # R9
+            # R9. Exempt: CORE rebalances, and intraday satellite strategies, which must be flat by the close.
+            if src is not Source.CORE and not self._intraday(intent):
                 sellable = limits.sellable_after_holding_period(sym, held, snap, cfg.min_holding_days)
                 if qty > sellable + limits.EPS:
                     return _block(
@@ -107,7 +117,9 @@ class RiskGate:
                 f"Your account is down {cfg.account_drawdown_alert:.0%}+ from its peak. New non-core buys "
                 "are paused; your core plan keeps running."
             )
-        if src in (Source.SATELLITE, Source.USER) and snap.trades_this_week >= cfg.max_trades_per_week:  # R5
+        # R5 (intraday satellite strategies have their own per-day cap and PDT check instead)
+        if (src in (Source.SATELLITE, Source.USER) and not self._intraday(intent)
+                and snap.trades_this_week >= cfg.max_trades_per_week):
             return _block(
                 f"You've reached the limit of {cfg.max_trades_per_week} trades this week. Frequent trading "
                 "is one of the biggest drags on beginner returns."

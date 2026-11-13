@@ -3,7 +3,7 @@
 Beginner mode for LumiBot: a guarded, paper-only, benchmark-first layer in the `lumisafe/` package.
 
 - **Last Updated:** 2026-11-13
-- **Status:** Implemented (SPEC.md phases 0-8); paper trading only
+- **Status:** Implemented (SPEC.md phases 0-8) plus the owner-approved paper-only day-trading lab; paper trading only
 - **Audience:** contributors and AI agents working on `lumisafe/`
 
 ## Overview
@@ -35,6 +35,20 @@ OrderIntent (core | satellite | user)
 | `promotion/` | Walk-forward (≥ 4 folds, ≥ 8 years, costs 0.10%), criteria, JSON registry state machine |
 | `journal/journal.py` | SQLite triggers forbid UPDATE/DELETE of decisions; fill/shadow fields set once; `events` table for heartbeats, alerts, promotions |
 | `live_unlock.py` | Human-only live gate (four conditions). Frozen after Phase 1; a hash test pins it. The bridge has **no** live-broker factory. |
+
+## Day-trading lab (paper only, owner-approved amendment)
+
+`lumisafe daytrade fetch | backtest | report | enable | run | status`. Details and every assumption: DECISIONS.md, "Day-trading lab".
+
+| Module | Role |
+|---|---|
+| `adapters/alpaca_data.py` | Alpaca SIP daily/minute bars, timestamped news, NBBO quotes; cached history (`~/.lumisafe/cache/`), uncached `LiveMarketData` for today |
+| `daytrade/dataset.py` | Per-day candidates as known at 09:45 (gap ≥ 2%, top-100 dollar volume, headline before 09:44) |
+| `daytrade/sim.py` | Minute simulator: spread, slippage, SEC/FINRA fees, whole shares, volume cap, settlement, PDT, daily loss halt, flat by close |
+| `daytrade/report.py` | Walk-forward (2y train / 1y test, 2018-2025), taxes with wash sales, SPY comparison, plain-English report |
+| `daytrade/live.py` + `runner.DayTradeRunner` | Paper trading with the same code and tuned parameters; bracket orders; AI veto with an intraday prompt |
+
+Trades are SATELLITE intents tagged `INTRADAY_STRATEGY`; only that name skips R5/R9 (and may exit during R6/R7 halts). Tests: `test_daytrade_sim.py`, `test_daytrade_lab.py`, `test_daytrade_rules.py`, `test_daytrade_runner.py`.
 
 ## Gotchas learned while building it
 

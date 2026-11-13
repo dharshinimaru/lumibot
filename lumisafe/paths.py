@@ -46,3 +46,10 @@ def inbox_path() -> Path:
 def pending_path() -> Path:
     """Delayed user intents awaiting `lumisafe confirm` (B4)."""
     return home() / "pending.json"
+
+
+def cache_dir() -> Path:
+    """Downloaded market data (minute bars, news, quotes). Safe to delete; it re-downloads."""
+    d = home() / "cache"
+    d.mkdir(parents=True, exist_ok=True)
+    return d

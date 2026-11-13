@@ -108,17 +108,48 @@ def daily_closes(strategy: Any, symbol: str, length: int) -> pd.Series | None:
 # --- orders ---------------------------------------------------------------------------
 
 
-def submit(strategy: Any, symbol: str, side: str, quantity: float, reason: str) -> str:
+def submit(strategy: Any, symbol: str, side: str, quantity: float, reason: str,
+           bracket: tuple[float, float] | None = None) -> str:
     """Place a market DAY order through Lumibot and return its identifier.
 
     Only ``lumisafe/runner.py`` may call this, and only after RiskGate approval
     (an AST test enforces the caller). DAY time-in-force is what Alpaca
     requires for fractional share orders.
+
+    ``bracket=(stop_price, take_profit_price)`` (day-trading lab, BUY only)
+    attaches a stop-loss and a take-profit at the broker, so the exits hold even
+    if this process stops. Alpaca brackets need whole shares.
     """
-    qty = Decimal(str(round(float(quantity), 6)))
-    order = strategy.create_order(symbol, qty, side, time_in_force="day")
+    if bracket is None:
+        qty = Decimal(str(round(float(quantity), 6)))
+        order = strategy.create_order(symbol, qty, side, time_in_force="day")
+    else:
+        from lumibot.entities import Order
+
+        stop, take = bracket
+        if side != "buy" or not float(quantity).is_integer() or not (0 < stop < take):
+            raise ValueError("bracket orders are whole-share BUYs with 0 < stop < take-profit")
+        order = strategy.create_order(symbol, int(quantity), side, time_in_force="day",
+                                      order_type=Order.OrderType.MARKET, order_class=Order.OrderClass.BRACKET,
+                                      secondary_stop_price=round(float(stop), 2),
+                                      secondary_limit_price=round(float(take), 2))
     strategy.submit_order(order, reason=reason)
     return str(order.identifier)
+
+
+def cancel_open_orders(strategy: Any, symbol: str) -> int:
+    """Cancel this symbol's open orders (e.g. a bracket's stop/take-profit legs before selling at the close)."""
+    n = 0
+    for o in strategy.get_orders() or []:
+        sym = getattr(o, "symbol", None) or getattr(getattr(o, "asset", None), "symbol", None)
+        if sym != symbol:
+            continue
+        active = getattr(o, "is_active", None)
+        if callable(active) and not active():
+            continue
+        strategy.cancel_order(o)
+        n += 1
+    return n
 
 
 def order_id(order: Any) -> str:
