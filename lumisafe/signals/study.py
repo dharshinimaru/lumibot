@@ -176,15 +176,19 @@ def generate(events: list[Event], mkt: Market, open_time: Callable[[date], datet
     for e in events:
         by_sym_kind[(e.symbol, e.kind)].append(e)
         news_times[e.symbol].append(e.at)
-        headlines[e.symbol].append((e.at, e.headline))
+        headlines[e.symbol].append((e.at, e.headline, e.kind))
     for v in news_times.values():
         v.sort()
     for v in headlines.values():
         v.sort()
 
+    good_news = ("earnings_beat", "guide_up", "upgrade", "initiate_bullish", "sales_beat")
+
     def latest_headline(sym: str, lo: datetime, hi: datetime) -> str:
-        hs = [h for t, h in headlines.get(sym, []) if lo <= t <= hi]
-        return hs[-1] if hs else "company news"
+        """The headline that most likely explains a gap up: good news first, else the latest one."""
+        hs = [(t, h, k) for t, h, k in headlines.get(sym, []) if lo <= t <= hi]
+        good = [h for t, h, k in hs if k in good_news]
+        return good[-1] if good else (hs[-1][1] if hs else "company news")
 
     def at_open(sig, e: Event, why: str):
         d = mkt.next_session_on_or_after(e.at, open_time)
@@ -256,7 +260,9 @@ def generate(events: list[Event], mkt: Market, open_time: Callable[[date], datet
             if pc > 0 and o >= 1.03 * pc and c >= o and _news_between(times, open_time(d) - timedelta(hours=16),
                                                                       open_time(d)):
                 out.append(Entry("news_gap_held", sym, d1, "opened 3%+ up on news and held into the close: " +
-                                 latest_headline(sym, open_time(d) - timedelta(hours=16), open_time(d))))
+                                 # explanation only: look back 24 h so last evening's earnings show up; the
+                                 # signal's own news test above stays the pre-registered 16 h
+                                 latest_headline(sym, open_time(d) - timedelta(hours=24), open_time(d))))
             if pc > 0 and o <= 0.96 * pc and not _news_between(times, open_time(d) - timedelta(hours=24),
                                                                 open_time(d)):
                 # buy at THIS open is not possible after seeing it gap; enter at the next open

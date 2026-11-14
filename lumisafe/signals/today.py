@@ -85,7 +85,7 @@ def format_today(ideas: list[Idea], avoid: list[Idea], picks: dict[str, int], sl
         lines.append("Nothing today: none of the proven signals fired for the next open. Most days are like this.")
     for i in ideas:
         h = i.history
-        stat = (f"since 2022 (data it was never tuned on): {h.get('trades', 0)} trades, "
+        stat = (f"2022-2025: {h.get('trades', 0)} trades, "
                 f"{h.get('hit_rate', 0):.0%} ended positive after costs, average {h.get('mean_net', 0):+.2%} "
                 f"({h.get('mean_excess', 0):+.2%} vs SPY)") if h else "no history"
         size = f" · about ${0.10 * slice_value:,.0f} (10% of your satellite slice)" if slice_value else ""

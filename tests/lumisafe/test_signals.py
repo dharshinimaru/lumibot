@@ -204,6 +204,7 @@ def test_today_lists_only_passed_signals_and_an_avoid_list():
     assert ideas[0].sell_at_close_on == date(2026, 11, 27)  # 10 trading days; Thanksgiving (Nov 26) skipped
     text = format_today(ideas, avoid, {"earnings_beat_strong": 10}, 10_000.0)
     assert "BUY ABC at the open on Fri Nov 13" in text and "60% ended positive" in text and "$1,000" in text
+    assert "never" not in text  # 2022-2025 informed which signals are listed; never call it untouched
     # signals that didn't pass are never suggested
     ideas, _ = scan(FakeLive(news), {"upgrade_bullish": 5}, {}, now)
     assert ideas == []
@@ -258,3 +259,12 @@ def test_gap_idea_shows_the_real_headline_and_one_line_per_stock():
     assert len(ideas) == 1 and ideas[0].symbol == "ABC" and ideas[0].hold == 20
     text = format_today(ideas, [], {"news_gap_held": 20}, None)
     assert "ABC Q3 EPS $1.30 Beats" in text and "News gap up 3%+ held" in text and "Earnings beat, gap up held" in text
+
+
+def test_gap_reason_prefers_the_good_news_over_a_later_unrelated_headline():
+    at = datetime(2020, 3, 4, 7, 0, tzinfo=NY)
+    events = [Event("ABC", at, "earnings_beat", 0.1, "ABC Q4 EPS $1.10 Beats $1.00 Estimate"),
+              Event("ABC", at + timedelta(minutes=30), "pt_cut", 90.0, "Firm Lowers ABC Price Target to $90")]
+    mkt = market({date(2020, 3, 4): (104.0, 105.0)})
+    gap = [e for e in study.generate(events, mkt, opens, EVERYONE) if e.signal == "news_gap_held"]
+    assert gap and "Beats" in gap[0].why
