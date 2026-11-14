@@ -50,6 +50,20 @@ OrderIntent (core | satellite | user)
 
 Trades are SATELLITE intents tagged `INTRADAY_STRATEGY`; only that name skips R5/R9 (and may exit during R6/R7 halts). Tests: `test_daytrade_sim.py`, `test_daytrade_lab.py`, `test_daytrade_rules.py`, `test_daytrade_runner.py`.
 
+## Signal research engine (5-20 day holds)
+
+`lumisafe signals fetch | study | report | today`. Pre-registered rules: docstring of `lumisafe/signals/study.py`; results and the bias check: DECISIONS.md, "Signal research engine".
+
+| Module | Role |
+|---|---|
+| `signals/fetch.py` | Every headline for the pool, per NY day (`~/.lumisafe/cache/news_full/`) |
+| `signals/events.py` | Headlines → events (earnings surprise, sales beat/miss, upgrades, initiations, PT changes, guidance); single-ticker only |
+| `signals/study.py` | 13 signals + 3 avoid signals; real-spread costs; SPY and same-stock benchmarks; clustered t; walk-forward; `robust_picks` |
+| `signals/run.py` | Runs the study, report text, current picks |
+| `signals/today.py` | Daily shortlist from the current picks, live data, completed bars only, one line per stock |
+
+Gotcha: alpaca-py `NewsRequest(limit=N)` caps the TOTAL (it pages internally); use `limit=None`.
+
 ## Gotchas learned while building it
 
 - **Dividends in backtests:** LumiBot 4.6.54's Yahoo backtest credits no dividend cash on raw closes (~2%/yr missing for an ETF mix), and `auto_adjust=True` drops Open/High/Low so no orders fill. LumiSafe backtests through `PandasDataBacktesting` with real Yahoo bars scaled by Yahoo's own `Adj Close / Close` factor. The 10-year Balanced core now tracks its blend within +0.29 pts/yr.

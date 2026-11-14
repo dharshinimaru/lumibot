@@ -44,6 +44,37 @@ def universe_fn(bars: dict[str, pd.DataFrame], days: list[date], top_n: int = 10
     return lambda d: cache.get(d, set())
 
 
+def pool_benchmark(bars: dict[str, pd.DataFrame], uni) -> Callable[[date, date], float | None]:
+    """Equal-weight open->close return of the day's universe (the same stocks the signals pick from)."""
+    opn = pd.DataFrame({s: b["open"] for s, b in bars.items() if s != "SPY"}).sort_index()
+    cls = pd.DataFrame({s: b["close"] for s, b in bars.items() if s != "SPY"}).sort_index()
+    cache: dict[tuple[date, date], float | None] = {}
+
+    def f(d0: date, d1: date) -> float | None:
+        if (d0, d1) not in cache:
+            syms = sorted(uni(d0))
+            t0, t1 = pd.Timestamp(d0), pd.Timestamp(d1)
+            if not syms or t0 not in opn.index or t1 not in cls.index:
+                cache[(d0, d1)] = None
+            else:
+                r = (cls.loc[t1, syms] / opn.loc[t0, syms] - 1).dropna()
+                cache[(d0, d1)] = float(r.mean()) if len(r) else None
+        return cache[(d0, d1)]
+
+    return f
+
+
+def pool_yearly(bars, uni, days: list[date], first: int, last: int) -> dict[str, float]:
+    close = pd.DataFrame({s: b["close"] for s, b in bars.items() if s != "SPY"}).sort_index()
+    rets = close.pct_change(fill_method=None)
+    out = {}
+    for y in range(first, last + 1):
+        vals = [rets.loc[pd.Timestamp(d), sorted(uni(d))].mean() for d in days
+                if d.year == y and uni(d) and pd.Timestamp(d) in rets.index]
+        out[str(y)] = float(np.prod([1 + v for v in vals if v == v]) - 1)
+    return out
+
+
 def run(md, start: date = date(2016, 1, 4), end: date = date(2025, 12, 31),
         progress: Callable[[str], None] = print) -> dict:
     sess = sessions(start, end)
@@ -58,7 +89,7 @@ def run(md, start: date = date(2016, 1, 4), end: date = date(2025, 12, 31),
     entries = study.generate(events, mkt, lambda d: opens[d], uni)
     progress(f"{len(entries)} signal entries")
     spread_samples = json.loads((md.cache / "spreads.json").read_text()) if (md.cache / "spreads.json").is_file() else {}
-    trades = study.evaluate(entries, mkt, study.spread_model(spread_samples))
+    trades = study.evaluate(entries, mkt, study.spread_model(spread_samples), pool_fn=pool_benchmark(bars, uni))
     progress(f"{len(trades)} trade results (all signals x holding periods)")
 
     disc = [t for t in trades if t.entry_day <= DISCOVERY_END]
@@ -97,11 +128,13 @@ def run(md, start: date = date(2016, 1, 4), end: date = date(2025, 12, 31),
 
     v, p = backtest_is_valid(wf), backtest_to_paper(wf)
     # what `lumisafe signals today` may use from now on: selected on everything that has closed
-    current = study.select(trades, before=end + timedelta(days=1))
+    raw = study.select(trades, before=end + timedelta(days=1))
+    current = study.robust_picks(trades, raw, DISCOVERY_END)
     current_stats = {s: asdict(study.stats([t for t in trades if t.entry_day > DISCOVERY_END], s, h, "2022-2025"))
                      for s, h in current.items()}
     return {"walk_forward": wf.to_dict(), "passed": v.passed and p.passed, "reasons": v.reasons + p.reasons,
-            "current_picks": current, "current_stats": current_stats,
+            "current_picks": current, "current_stats": current_stats, "picks_before_bias_check": raw,
+            "pool_yearly": pool_yearly(bars, uni, days, 2018, end.year),
             "table": table, "picks_by_year": picks, "events": len(events), "entries": len(entries),
             "oos_cagr": _cagr(oos), "spy_cagr": _cagr(bench)}
 
@@ -138,28 +171,40 @@ def format_study(d: dict) -> str:
     hold = {(s["signal"], s["hold"]): s for s in d["table"]["holdout_2022_2025"]}
     lines = [f"Signal study on real data: {d['events']:,} company events from headlines, {d['entries']:,} signal "
              "entries, every result after spread, slippage and fees.",
-             "Each row: trades · share positive after costs · average result after costs · vs SPY same days "
-             "(t = how unlikely by luck; 2+ is meaningful)", ""]
+             "Each row: trades · share positive after costs · average result after costs · vs holding the same "
+             "stocks equally, same days (t = how unlikely by luck; 2+ is meaningful)", ""]
     hdr = f"  {'signal':<42}{'hold':>5}  {'2016-2021 (found on)':<36}{'2022-2025 (never seen)':<36}"
     lines += [hdr, "  " + "-" * (len(hdr) - 2)]
 
     def cell(s):
         if not s or not s["trades"]:
             return f"{'-':<36}"
-        return f"{s['trades']:>5} · {s['hit_rate']:>4.0%} · {s['mean_net']:+6.2%} · {s['mean_excess']:+6.2%} t{s['t_excess']:+.1f}  "
+        return f"{s['trades']:>5} · {s['hit_rate']:>4.0%} · {s['mean_net']:+6.2%} · {s.get('mean_vs_pool', 0):+6.2%} t{s.get('t_vs_pool', 0):+.1f}  "
 
     for sig in study.SIGNALS:
         for h in (5, 10, 20):
             lines.append(f"  {NAMES.get(sig, sig):<42}{h:>4}d  {cell(disc.get((sig, h)))}{cell(hold.get((sig, h)))}")
     lines += ["", "Walk-forward (each year trades only the signals that had passed on earlier years):"]
+    pool = d.get("pool_yearly", {})
     for f in d["walk_forward"]["folds"]:
         sigs = f["chosen_params"].get("signals", {})
         names = ", ".join(f"{NAMES.get(s, s)} ({h}d)" for s, h in sigs.items()) or "none passed → stay in cash"
-        lines.append(f"  {f['test_start'][:4]}: {f['test_return']:+6.1%} vs SPY {f['benchmark_return']:+6.1%} · {names}")
+        y = f["test_start"][:4]
+        lines.append(f"  {y}: {f['test_return']:+6.1%} vs SPY {f['benchmark_return']:+6.1%} vs same stocks "
+                     f"{pool.get(y, 0.0):+6.1%} · {names}")
     wf = d["walk_forward"]
     lines += ["", f"Overall 2018-2025: {d['oos_cagr']:+.1%}/yr vs SPY {d['spy_cagr']:+.1%}/yr · Sharpe "
                   f"{wf['oos_sharpe']:.2f} vs {wf['benchmark_oos_sharpe']:.2f} · worst drop {wf['oos_max_drawdown']:.1%} "
                   f"vs {wf['benchmark_oos_max_drawdown']:.1%}",
-              "Verdict: " + ("PASSED; it may run on paper." if d["passed"] else
+              "Verdict: " + ("PASSED the SPEC bar against SPY; it may run on paper." if d["passed"] else
                              "did NOT pass: " + "; ".join(d["reasons"]) + ".")]
+    if pool:
+        yrs = len(pool)
+        pc = float(np.prod([1 + v for v in pool.values()])) ** (1 / yrs) - 1
+        lines += [f"Bias check: simply holding the same stocks equally made {pc:+.1%}/yr. The stock list was written "
+                  "in 2026 and leans toward later winners, so beating SPY alone doesn't prove the signals work."]
+    picks = d.get("current_picks", {})
+    lines += ["", "Signals used for `lumisafe signals today` (beat SPY on all years AND beat the same stocks in both "
+                  "2016-2021 and 2022-2025):"]
+    lines += [f"  - {NAMES.get(s, s)}, hold {h} days" for s, h in picks.items()] or ["  none"]
     return "\n".join(lines)

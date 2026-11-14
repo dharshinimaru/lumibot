@@ -86,10 +86,15 @@ class TradeResult:
     cost: float
     net: float
     spy: float
+    pool: float | None = None  # equal-weight return of that day's same-stock universe over the same window
 
     @property
     def excess(self) -> float:
         return self.net - self.spy
+
+    @property
+    def vs_pool(self) -> float | None:
+        return None if self.pool is None else self.net - self.pool
 
 
 # --- data plumbing ------------------------------------------------------------------------------------------
@@ -167,11 +172,19 @@ def generate(events: list[Event], mkt: Market, open_time: Callable[[date], datet
     out: list[Entry] = []
     by_sym_kind: dict[tuple[str, str], list[Event]] = defaultdict(list)
     news_times: dict[str, list[datetime]] = defaultdict(list)
+    headlines: dict[str, list[tuple[datetime, str]]] = defaultdict(list)
     for e in events:
         by_sym_kind[(e.symbol, e.kind)].append(e)
         news_times[e.symbol].append(e.at)
+        headlines[e.symbol].append((e.at, e.headline))
     for v in news_times.values():
         v.sort()
+    for v in headlines.values():
+        v.sort()
+
+    def latest_headline(sym: str, lo: datetime, hi: datetime) -> str:
+        hs = [h for t, h in headlines.get(sym, []) if lo <= t <= hi]
+        return hs[-1] if hs else "company news"
 
     def at_open(sig, e: Event, why: str):
         d = mkt.next_session_on_or_after(e.at, open_time)
@@ -242,7 +255,8 @@ def generate(events: list[Event], mkt: Market, open_time: Callable[[date], datet
                 out.append(Entry("pullback_uptrend", sym, d1, "down 7%+ in 5 days, still above its 200-day average"))
             if pc > 0 and o >= 1.03 * pc and c >= o and _news_between(times, open_time(d) - timedelta(hours=16),
                                                                       open_time(d)):
-                out.append(Entry("news_gap_held", sym, d1, "news, opened 3%+ up and held into the close"))
+                out.append(Entry("news_gap_held", sym, d1, "opened 3%+ up on news and held into the close: " +
+                                 latest_headline(sym, open_time(d) - timedelta(hours=16), open_time(d))))
             if pc > 0 and o <= 0.96 * pc and not _news_between(times, open_time(d) - timedelta(hours=24),
                                                                 open_time(d)):
                 # buy at THIS open is not possible after seeing it gap; enter at the next open
@@ -278,7 +292,8 @@ def _news_between(times: list[datetime], lo: datetime, hi: datetime) -> bool:
 
 
 def evaluate(entries: list[Entry], mkt: Market, spread: Callable[[str, int], float],
-             holds=HOLDS_TRADABLE + HOLDS_INFO) -> list[TradeResult]:
+             holds=HOLDS_TRADABLE + HOLDS_INFO,
+             pool_fn: Callable[[date, date], float | None] | None = None) -> list[TradeResult]:
     """Net and SPY-relative return of every entry at every holding period (one per signal/stock/day)."""
     out, seen = [], set()
     for en in entries:
@@ -299,7 +314,8 @@ def evaluate(entries: list[Entry], mkt: Market, spread: Callable[[str, int], flo
             gross = float(r_out["close"]) / float(r_in["open"]) - 1
             cost = spread(en.symbol, en.entry_day.year) + 2 * SLIPPAGE + SELL_FEE
             spy = float(s_out["close"]) / float(s_in["open"]) - 1
-            out.append(TradeResult(en.signal, en.symbol, h, en.entry_day, xd, gross, cost, gross - cost, spy))
+            pool = pool_fn(en.entry_day, xd) if pool_fn is not None else None
+            out.append(TradeResult(en.signal, en.symbol, h, en.entry_day, xd, gross, cost, gross - cost, spy, pool))
     return out
 
 
@@ -313,6 +329,8 @@ class Stats:
     mean_net: float
     mean_excess: float
     t_excess: float  # clustered by entry date
+    mean_vs_pool: float = 0.0  # vs holding the same day's stock universe equally (removes stock-list bias)
+    t_vs_pool: float = 0.0
 
     @property
     def tradable(self) -> bool:
@@ -323,13 +341,38 @@ def stats(trades: list[TradeResult], signal: str, hold: int, period: str) -> Sta
     ts = [t for t in trades if t.signal == signal and t.hold == hold]
     if not ts:
         return Stats(signal, hold, period, 0, 0.0, 0.0, 0.0, 0.0)
+    t_stat = _clustered_t(ts, lambda t: t.excess)
+    pooled = [t for t in ts if t.vs_pool is not None]
+    return Stats(signal, hold, period, len(ts), float(np.mean([t.net > 0 for t in ts])),
+                 float(np.mean([t.net for t in ts])), float(np.mean([t.excess for t in ts])), t_stat,
+                 float(np.mean([t.vs_pool for t in pooled])) if pooled else 0.0,
+                 _clustered_t(pooled, lambda t: t.vs_pool) if pooled else 0.0)
+
+
+def _clustered_t(ts: list[TradeResult], value: Callable[[TradeResult], float]) -> float:
+    """t-statistic of the mean, with trades entered on the same day averaged first (they aren't independent)."""
     by_day: dict[date, list[float]] = defaultdict(list)
     for t in ts:
-        by_day[t.entry_day].append(t.excess)
+        by_day[t.entry_day].append(value(t))
     daily = np.array([np.mean(v) for v in by_day.values()])
-    t_stat = float(daily.mean() / (daily.std(ddof=1) / math.sqrt(len(daily)))) if len(daily) > 2 and daily.std(ddof=1) > 0 else 0.0
-    return Stats(signal, hold, period, len(ts), float(np.mean([t.net > 0 for t in ts])),
-                 float(np.mean([t.net for t in ts])), float(np.mean([t.excess for t in ts])), t_stat)
+    if len(daily) <= 2 or daily.std(ddof=1) == 0:
+        return 0.0
+    return float(daily.mean() / (daily.std(ddof=1) / math.sqrt(len(daily))))
+
+
+ROBUST_T = 1.5
+
+
+def robust_picks(trades: list[TradeResult], chosen: dict[str, int], split: date) -> dict[str, int]:
+    """Of ``chosen``, keep signals that ALSO beat the same-stock benchmark (t >= 1.5) both before and after
+    ``split``. Added after the first full run exposed stock-list bias; it can only remove signals."""
+    keep = {}
+    for s, h in chosen.items():
+        a = stats([t for t in trades if t.entry_day <= split], s, h, "a")
+        b = stats([t for t in trades if t.entry_day > split], s, h, "b")
+        if a.mean_vs_pool > 0 and b.mean_vs_pool > 0 and a.t_vs_pool >= ROBUST_T and b.t_vs_pool >= ROBUST_T:
+            keep[s] = h
+    return keep
 
 
 def table(trades: list[TradeResult], period: str) -> list[Stats]:

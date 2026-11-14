@@ -62,7 +62,17 @@ def scan(live, picks: dict[str, int], pick_stats: dict[str, dict], now: datetime
             avoid.append(Idea(e.signal, e.symbol, nxt, nxt, e.why, 0, {}))
     order = list(picks)
     ideas.sort(key=lambda i: order.index(i.signal))
-    return ideas, avoid
+    merged: dict[str, Idea] = {}
+    for i in ideas:  # one line per stock; if both signals fire, keep both reasons and the longer hold
+        if i.symbol not in merged:
+            merged[i.symbol] = i
+        else:
+            m = merged[i.symbol]
+            longer = i if i.hold > m.hold else m
+            merged[i.symbol] = Idea(m.signal + "+" + i.signal, i.symbol, m.buy_at_open_on, longer.sell_at_close_on,
+                                    m.why if m.why == i.why else f"{m.why} | {i.why}", longer.hold,
+                                    longer.history)
+    return list(merged.values()), avoid
 
 
 def format_today(ideas: list[Idea], avoid: list[Idea], picks: dict[str, int], slice_value: float | None) -> str:
@@ -81,7 +91,7 @@ def format_today(ideas: list[Idea], avoid: list[Idea], picks: dict[str, int], sl
         size = f" · about ${0.10 * slice_value:,.0f} (10% of your satellite slice)" if slice_value else ""
         lines += [f"BUY {i.symbol} at the open on {i.buy_at_open_on:%a %b %-d}, sell at the close on "
                   f"{i.sell_at_close_on:%a %b %-d} ({i.hold} trading days){size}",
-                  f"    signal: {NAMES.get(i.signal, i.signal)}",
+                  f"    signal: {' + '.join(NAMES.get(s, s) for s in i.signal.split('+'))}",
                   f"    why: {i.why[:140]}",
                   f"    track record: {stat}"]
     if avoid:

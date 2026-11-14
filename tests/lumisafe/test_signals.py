@@ -221,3 +221,40 @@ def test_today_with_no_passed_signals_says_so_plainly():
     from lumisafe.signals.today import format_today
 
     assert "nothing to suggest" in format_today([], [], {}, None)
+
+
+def test_bias_check_keeps_only_signals_that_beat_the_same_stocks_in_both_periods():
+    rng = np.random.default_rng(3)
+
+    def mk(signal, day, edge_vs_pool):
+        d = DAYS[day]
+        net = 0.02 + edge_vs_pool + rng.normal(0, 0.01)
+        return study.TradeResult(signal, "ABC", 20, d, d + timedelta(days=28), net + 0.001, 0.001, net, 0.0, 0.02)
+
+    real = [mk("news_gap_held", i, 0.01) for i in range(0, 500, 2)]
+    list_bias = [mk("pullback_uptrend", i, 0.0) for i in range(0, 500, 2)]  # beats SPY, but only as much as the pool
+    faded = [mk("rel_strength", i, 0.01 if DAYS[i] <= date(2019, 12, 31) else -0.005) for i in range(0, 500, 2)]
+    trades = real + list_bias + faded
+    chosen = {"news_gap_held": 20, "pullback_uptrend": 20, "rel_strength": 20}
+    assert study.robust_picks(trades, chosen, date(2019, 12, 31)) == {"news_gap_held": 20}
+    s = study.stats(real, "news_gap_held", 20, "x")
+    assert s.mean_vs_pool == pytest.approx(np.mean([t.net - 0.02 for t in real])) and s.t_vs_pool > 2
+
+
+def test_gap_idea_shows_the_real_headline_and_one_line_per_stock():
+    from lumisafe.signals.today import format_today, scan
+
+    class Gap(FakeLive):
+        def recent_daily(self, symbols, days=420, adjustment="all"):
+            out = super().recent_daily(symbols, days, adjustment)
+            df = out["ABC"]
+            df.iloc[-1] = [104.0, 105.0, 103.5, 104.5, 3e6]  # Nov 12: opened 4% up and held
+            return out
+
+    news = [item("ABC Q3 EPS $1.30 Beats $1.10 Estimate, Sales $5B Beat $4.8B Estimate", ("ABC",),
+                 "2026-11-12T12:00:00+00:00")]
+    now = datetime(2026, 11, 12, 18, 0, tzinfo=NY)
+    ideas, _ = scan(Gap(news), {"news_gap_held": 20, "beat_gap_held": 10}, {}, now)
+    assert len(ideas) == 1 and ideas[0].symbol == "ABC" and ideas[0].hold == 20
+    text = format_today(ideas, [], {"news_gap_held": 20}, None)
+    assert "ABC Q3 EPS $1.30 Beats" in text and "News gap up 3%+ held" in text and "Earnings beat, gap up held" in text
