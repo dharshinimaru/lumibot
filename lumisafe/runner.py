@@ -897,3 +897,332 @@ def run_daytrade_paper(config: LumiSafeConfig, registry_state: str | None, param
     p = {"lumisafe_config": config.model_dump(mode="json"), "journal_path": str(paths.journal_path()),
          "state_path": str(paths.state_path()), "mode": "paper", "daytrade_params": _asdict(params)}
     return bridge.run_paper(get_daytrade_strategy_class(), p, run_once=False, name="LumiSafeDayTrade")
+
+
+# --- signal autopilot (news_signals, 5-20 day holds, paper only) ------------------------------------------
+
+SIGNALS_STRATEGY = "news_signals"
+SIGNALS_BOOK_KEY = "signals_book"
+SIGNALS_ALLOWED_STATES = ("PAPER", "LIVE_ELIGIBLE")  # P1: the study must have passed (SPEC §8)
+SIGNAL_IDEA_FRACTION = 0.10  # each decision is 10% of the satellite slice, as `signals today` says
+
+
+def non_core_trades_since(journal: Journal, since: datetime) -> int:
+    """R5 count: submitted satellite + user trades since ``since`` (core and intraday-lab trades exempt)."""
+    return sum(1 for e in journal.query(since=since, submitted=True)
+               if e.intent.source is not Source.CORE and e.intent.strategy_name not in INTRADAY_STRATEGIES)
+
+
+def signals_allowed(registry_state: str | None, picks: dict) -> str | None:
+    if registry_state not in SIGNALS_ALLOWED_STATES:
+        return (f"The signal strategy is {registry_state or 'not tested yet'}; it may only paper trade once the "
+                "study has passed (run `lumisafe signals study`).")
+    if not picks:
+        return "No signal passed the study, so there is nothing to trade."
+    return None
+
+
+class SignalRunner:
+    """Write down each decision before the open, trade it on paper, sell on its exit day, grade it.
+
+    Lifecycle (Lumibot calls these): ``scan`` 10 minutes before the open and after the close;
+    ``tick`` every few minutes while the market is open (buys in the first 30 minutes, sells in
+    the last 20 on the exit day); ``on_fill`` when Alpaca reports a fill.
+
+    Orders go through the same Pipeline as everything else (TaxGuard → RiskGate → submit →
+    journal) as SATELLITE intents named ``news_signals``. No AI veto: the forward test must
+    grade exactly the rule the study tested, so an extra filter would change what is measured.
+    The 5-trades-a-week cap (R5) still applies; a decision it blocks is still graded.
+    """
+
+    def __init__(self, config: LumiSafeConfig, journal: Journal, state: StateStore, live, picks: dict,
+                 pick_stats: dict, *, ledger_path: Path | None = None, notify: Callable[[str], None] | None = None,
+                 session_fn: Callable | None = None, scan_fn: Callable | None = None):
+        from lumisafe.signals.forward import Ledger
+
+        self.config, self.journal, self.state, self.live = config, journal, state, live
+        self.picks, self.pick_stats = picks, pick_stats
+        self.ledger_path = ledger_path or Ledger.path()
+        self.notify = notify or (lambda msg: None)
+        self.session_fn = session_fn or _session_for
+        if scan_fn is None:
+            from lumisafe.signals.today import scan as scan_fn
+        self.scan_fn = scan_fn
+        core = set(config.core.etfs)
+        self.pipeline = Pipeline(journal, RiskGate(config.risk, core, intraday_strategies=INTRADAY_STRATEGIES),
+                                 tax=TaxGuard(core, min_holding_days=config.risk.min_holding_days,
+                                              intraday_strategies=INTRADAY_STRATEGIES))
+        import threading
+
+        self._lock = threading.RLock()  # Lumibot reports fills on another thread
+
+    # -- helpers ---------------------------------------------------------------------------------
+
+    def _ledger(self):
+        from lumisafe.signals.forward import Ledger
+
+        return Ledger.load(self.ledger_path)
+
+    def _book(self, acct) -> dict:
+        b = dict(self.state.get(SIGNALS_BOOK_KEY) or {})
+        if "base" not in b:  # the slice this strategy is graded against, fixed when it starts
+            b["base"] = self.config.satellite.max_weight * acct.equity
+            b["realized"] = 0.0
+            b["started"] = acct.as_of.date().isoformat()
+        return b
+
+    def _slice_now(self, book: dict, ledger, prices: dict) -> float:
+        unreal = sum(d.qty * (prices.get(d.symbol, d.buy_fill or 0.0) - (d.buy_fill or 0.0))
+                     for d in ledger.open_positions())
+        return float(book["base"]) + float(book["realized"]) + unreal
+
+    def _snapshot(self, acct, book: dict, ledger) -> PortfolioSnapshot:
+        from lumisafe.types import TaxLot
+
+        sat = self._slice_now(book, ledger, acct.prices)
+        day = acct.as_of.date().isoformat()
+        if book.get("day") != day:
+            book["day"], book["day_start"] = day, sat
+        book["peak"] = max(float(book.get("peak", 0.0)), sat)
+        lots = [TaxLot(d.symbol, d.qty, d.buy_fill, datetime.fromisoformat(d.bought_at))
+                for d in ledger.open_positions() if d.buy_fill and d.bought_at]
+        return PortfolioSnapshot(as_of=acct.as_of, cash=acct.cash, equity=acct.equity,
+                                 positions=dict(acct.positions), prices=dict(acct.prices),
+                                 peak_equity=max(float(self.state.get("peak_equity", 0.0)), acct.equity),
+                                 satellite_equity=sat, satellite_peak_equity=book["peak"],
+                                 satellite_day_start_equity=book["day_start"],
+                                 trades_this_week=non_core_trades_since(self.journal, week_start(acct.as_of)),
+                                 lots=lots)
+
+    def _intent(self, symbol: str, side: Side, qty: float, reason: str, at: datetime) -> OrderIntent:
+        import uuid
+
+        return OrderIntent(intent_id=str(uuid.uuid4()), created_at=at, source=Source.SATELLITE, symbol=symbol,
+                           side=side, quantity=float(qty), reason=reason, strategy_name=SIGNALS_STRATEGY)
+
+    def _save(self, ledger, book: dict) -> None:
+        ledger.save(self.ledger_path)
+        self.state.set(SIGNALS_BOOK_KEY, book)
+        self.state.save()
+
+    # -- decisions ---------------------------------------------------------------------------------
+
+    def scan(self, now: datetime) -> list[str]:
+        """Record the decisions for the next open. Called before the open and after the close."""
+        with self._lock:
+            ledger = self._ledger()
+            ideas, _avoid = self.scan_fn(self.live, self.picks, self.pick_stats, now)
+
+            def spread(sym):
+                return self.live.spread(sym, now)
+
+            new = ledger.add(ideas, now, spread_fn=spread)
+            ledger.save(self.ledger_path)
+            self.journal.record_event("signals_scan", {"ideas": [i.symbol for i in ideas],
+                                                       "new": [d.symbol for d in new]}, ts=now)
+            msgs = [f"DECISION: BUY {d.symbol} at the open on {d.entry_day}, SELL at the close on {d.exit_day} "
+                    f"({d.hold} trading days). Why: {d.why[:120]}" for d in new]
+            write_decision_log(msgs, now)
+            for m in msgs:
+                self.notify(m)
+            return msgs or [f"scan at {now:%H:%M}: no new decisions"]
+
+    # -- trading -------------------------------------------------------------------------------------
+
+    def tick(self, executor: Any) -> list[str]:
+        with self._lock:
+            return self._tick(executor)
+
+    def _tick(self, executor: Any) -> list[str]:
+        ledger = self._ledger()
+        now = executor.get_datetime()
+        sess = self.session_fn(now.date())
+        if sess is None:
+            return []
+        today = now.date()
+        msgs: list[str] = []
+        for d in ledger.decisions:  # the runner wasn't running at that open: never buy late
+            if d.status == "planned" and (d.entry_day < today.isoformat()
+                                          or (d.entry_day == today.isoformat()
+                                              and now > sess.open + timedelta(minutes=30))):
+                d.status, d.note = "missed", "autopilot was not running at that open"
+        self._reconcile(executor, ledger, now)
+        symbols = {d.symbol for d in ledger.to_buy(today)} | {d.symbol for d in ledger.open_positions()}
+        acct = bridge.account_state(executor, symbols)
+        book = self._book(acct)
+        if now <= sess.open + timedelta(minutes=30):
+            for d in ledger.to_buy(today):
+                msgs.append(self._buy(executor, ledger, book, acct, d, now))
+                acct = bridge.account_state(executor, symbols)
+        if now >= sess.close - timedelta(minutes=20):
+            for d in ledger.to_sell(today):
+                msgs.append(self._sell(executor, ledger, book, acct, d, now))
+        self._save(ledger, book)
+        return [m for m in msgs if m]
+
+    def _buy(self, executor, ledger, book, acct, d, now) -> str:
+        price = acct.prices.get(d.symbol)
+        if not price:
+            d.status, d.note = "blocked", "no live price"
+            return f"{d.symbol}: not bought (no live price)"
+        slice_now = self._slice_now(book, ledger, acct.prices)
+        amount = SIGNAL_IDEA_FRACTION * slice_now
+        qty = float(int(amount // price)) if amount >= price else round(amount / price, 4)
+        if qty <= 0:
+            d.status, d.note = "blocked", "position too small"
+            return f"{d.symbol}: not bought (position too small)"
+        reason = (f"Signal: {d.signal}. Buy at the open, sell at the close on {d.exit_day}. {d.why}")
+        out = self.pipeline.run(self._intent(d.symbol, Side.BUY, qty, reason, now),
+                                self._snapshot(acct, book, ledger), executor, PipelineContext(
+                                    recent_sales=self.journal.query(symbol=d.symbol, side=Side.SELL,
+                                                                    submitted=True,
+                                                                    since=now - timedelta(days=31))))
+        if not out.submitted:
+            d.status, d.note = "blocked", out.entry.reviews[-1].explanation[:160]
+            return f"{d.symbol}: not bought ({d.note})"
+        d.status, d.qty, d.buy_order = "ordered", out.executed_qty, out.order_id
+        return f"{d.symbol}: buy order for {out.executed_qty:g} shares sent"
+
+    def _sell(self, executor, ledger, book, acct, d, now) -> str:
+        held = float(acct.positions.get(d.symbol, 0.0))
+        qty = min(d.qty, held)
+        if qty <= 0:
+            d.status, d.note = "closed", "position no longer in the account (sold by hand?)"
+            return f"{d.symbol}: nothing to sell"
+        out = self.pipeline.run(self._intent(d.symbol, Side.SELL, qty, f"Signal exit day ({d.exit_day}).", now),
+                                self._snapshot(acct, book, ledger), executor, PipelineContext())
+        if not out.submitted:
+            d.note = f"sell blocked: {out.entry.reviews[-1].explanation[:140]}"
+            return f"{d.symbol}: sell blocked ({d.note})"
+        d.status, d.sell_order = "selling", out.order_id
+        return f"{d.symbol}: sell order for {qty:g} shares sent"
+
+    def _reconcile(self, executor, ledger, now) -> None:
+        """Fills we missed (process restarted, callback lost): ask the broker."""
+        for d in ledger.decisions:
+            if d.status == "ordered" and d.buy_order:
+                status, price, qty = bridge.order_fill(executor, d.buy_order)
+                if price and qty:
+                    self._apply_fill(ledger, d, "buy", price, qty, now)
+                elif status in ("canceled", "cancelled", "expired", "rejected"):
+                    d.status, d.note = "blocked", f"buy order {status}"
+            elif d.status == "selling" and d.sell_order:
+                status, price, qty = bridge.order_fill(executor, d.sell_order)
+                if price and qty:
+                    self._apply_fill(ledger, d, "sell", price, qty, now)
+                elif status in ("canceled", "cancelled", "expired", "rejected"):
+                    d.status = "holding"  # try again at the next close
+
+    def _apply_fill(self, ledger, d, side: str, price: float, qty: float, at: datetime) -> None:
+        if side == "buy" and d.status == "ordered":
+            d.buy_fill, d.qty, d.bought_at, d.status = float(price), float(qty), at.isoformat(), "holding"
+        elif side == "sell" and d.status == "selling":
+            d.sell_fill, d.sold_at, d.status = float(price), at.isoformat(), "closed"
+            book = dict(self.state.get(SIGNALS_BOOK_KEY) or {})
+            book["realized"] = float(book.get("realized", 0.0)) + float(qty) * (float(price) - (d.buy_fill or price))
+            self.state.set(SIGNALS_BOOK_KEY, book)
+            self.journal.record_event("signals_exit", {"symbol": d.symbol, "qty": qty, "entry": d.buy_fill,
+                                                       "exit": price}, ts=at)
+
+    def on_fill(self, order_id: str, side: str, price: float, qty: float, at: datetime) -> None:
+        with self._lock:
+            ledger = self._ledger()
+            hit = ledger.by_order(order_id)
+            if hit is None:
+                return
+            d, _which = hit
+            self._apply_fill(ledger, d, side, price, qty, at)
+            ledger.save(self.ledger_path)
+            self.state.save()
+
+
+def write_decision_log(lines: list[str], at: datetime) -> None:
+    """Plain-text log you can keep open (``tail -f ~/.lumisafe/decisions.log``) and copy from."""
+    if not lines:
+        return
+    with open(paths.home() / "decisions.log", "a") as f:
+        for line in lines:
+            f.write(f"{at:%Y-%m-%d %H:%M %Z}  {line}\n")
+
+
+def mac_notify(message: str) -> None:
+    """A macOS notification banner; silently does nothing elsewhere."""
+    import subprocess
+    import sys as _sys
+
+    if _sys.platform != "darwin":
+        return
+    text = message.replace("\\", "").replace('"', "'")[:230]
+    try:
+        subprocess.run(["osascript", "-e", f'display notification "{text}" with title "LumiSafe decision"'],
+                       check=False, timeout=5, capture_output=True)
+    except Exception:
+        pass
+
+
+_SIGNALS_CLASS = None
+
+
+def _ny_now() -> datetime:
+    from zoneinfo import ZoneInfo
+
+    return datetime.now(ZoneInfo("America/New_York"))
+
+
+def build_signal_runner(params: dict) -> SignalRunner:
+    config = LumiSafeConfig.model_validate(params["lumisafe_config"])
+    journal = Journal(params["journal_path"])
+    state = StateStore(params.get("state_path"))
+    factory = params.get("runner_factory")
+    if factory is not None:
+        return factory(config, journal, state, params)
+    from lumisafe.adapters.alpaca_data import AlpacaMarketData, LiveMarketData
+
+    return SignalRunner(config, journal, state, LiveMarketData(AlpacaMarketData()), params["picks"],
+                        params["pick_stats"], notify=mac_notify)
+
+
+def get_signal_strategy_class():
+    """LumiSafeSignals(lumibot Strategy): scans before the open and after the close, trades on paper."""
+    global _SIGNALS_CLASS
+    if _SIGNALS_CLASS is not None:
+        return _SIGNALS_CLASS
+    Base = bridge.strategy_base()
+
+    class LumiSafeSignals(Base):
+        def initialize(self, parameters=None):
+            self.sleeptime = "5M"
+            self.minutes_before_opening = 10  # scan at 09:20 so overnight and pre-market news counts
+            self._signals = build_signal_runner(self.parameters)
+            self._log(self._signals.scan(_ny_now()))
+
+        def _log(self, msgs):
+            for m in msgs:
+                self.log_message(f"LumiSafe signals: {m}")
+                print(m, flush=True)
+
+        def before_market_opens(self):
+            self._log(self._signals.scan(_ny_now()))
+
+        def on_trading_iteration(self):
+            self._log(self._signals.tick(self))
+
+        def after_market_closes(self):
+            self._log(self._signals.scan(_ny_now()))
+
+        def on_filled_order(self, position, order, price, quantity, multiplier):
+            side = str(getattr(order, "side", "")).lower()
+            self._signals.on_fill(bridge.order_id(order), "buy" if "buy" in side else "sell", float(price),
+                                  float(quantity), self.get_datetime())
+
+    _SIGNALS_CLASS = LumiSafeSignals
+    return LumiSafeSignals
+
+
+def run_signals_paper(config: LumiSafeConfig, registry_state: str | None, picks: dict, pick_stats: dict) -> Any:
+    why = signals_allowed(registry_state, picks)
+    if why:
+        raise RuntimeError(why)
+    p = {"lumisafe_config": config.model_dump(mode="json"), "journal_path": str(paths.journal_path()),
+         "state_path": str(paths.state_path()), "mode": "paper", "picks": picks, "pick_stats": pick_stats}
+    return bridge.run_paper(get_signal_strategy_class(), p, run_once=False, name="LumiSafeSignals")

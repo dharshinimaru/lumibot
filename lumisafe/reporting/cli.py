@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import click
 
@@ -572,6 +573,72 @@ def signals_report():
         click.echo("No signal study yet. Run `lumisafe signals fetch`, then `lumisafe signals study`.")
         sys.exit(1)
     click.echo(format_study(_json.loads(files[-1].read_text())))
+    click.echo("\n" + DISCLAIMER)
+
+
+def _latest_signal_study() -> dict | None:
+    import json as _json
+
+    files = sorted(paths.reports_dir().glob("signals_*.json"))
+    return _json.loads(files[-1].read_text()) if files else None
+
+
+def signals_runner(config, state, picks, pick_stats):  # indirection for tests
+    from lumisafe.adapters import lumibot_bridge as bridge
+    from lumisafe.runner import run_signals_paper
+
+    bridge.load_dotenv_file(".env")
+    return run_signals_paper(config, state, picks, pick_stats)
+
+
+@signals.command("autopilot")
+def signals_autopilot():
+    """Write down each decision before the open, trade it on PAPER, sell on its exit day (Ctrl-C to stop)."""
+    from lumisafe.promotion.registry import Registry
+    from lumisafe.runner import SIGNALS_STRATEGY, signals_allowed
+
+    config = _load_config_or_exit()
+    d = _latest_signal_study() or {}
+    picks, pick_stats = d.get("current_picks", {}), d.get("current_stats", {})
+    st = Registry().state(SIGNALS_STRATEGY)
+    why = signals_allowed(st.value if st else None, picks)
+    if why:
+        click.echo(why)
+        sys.exit(1)
+    click.echo("Signal autopilot (PAPER). It scans at 09:20 and after the close, buys at the open, sells on the "
+               "exit day, and writes every decision to ~/.lumisafe/decisions.log before trading it.\n"
+               "Grade it any time with `lumisafe signals scorecard`. Ctrl-C to stop.")
+    signals_runner(config, st.value, picks, pick_stats)
+
+
+def scorecard_bars(symbols: list[str], days: int):  # indirection for tests
+    return signals_live().recent_daily(symbols, days=days, adjustment="all")
+
+
+@signals.command("scorecard")
+def signals_scorecard():
+    """Grade every recorded decision on real prices: did copying it make money, and did it beat SPY?"""
+    from datetime import date as _date
+
+    from lumisafe.daytrade.universe import sessions
+    from lumisafe.signals.forward import Ledger, format_scorecard, grade
+
+    ledger = Ledger.load()
+    if not ledger.decisions:
+        click.echo("No decisions recorded yet. Start `lumisafe signals autopilot` (paper) and leave it running; "
+                   "most days have no signal, so the first decision can take a while.")
+        return
+    today = datetime.now(timezone.utc).astimezone(ZoneInfo("America/New_York")).date()
+    first = min(_date.fromisoformat(x.entry_day) for x in ledger.decisions)
+    span = max((today - first).days + 10, 30)
+    bars = scorecard_bars(sorted({x.symbol for x in ledger.decisions} | {"SPY"}), span)
+    running = len([s for s in sessions(first, today) if s.day <= today])
+    d = _latest_signal_study() or {}
+    stats = list((d.get("current_stats") or {}).values())
+    expected = None
+    if stats:
+        expected = {k: sum(s.get(k, 0) for s in stats) / len(stats) for k in ("hit_rate", "mean_net", "mean_excess")}
+    click.echo(format_scorecard(grade(ledger, bars, today), expected, running))
     click.echo("\n" + DISCLAIMER)
 
 
