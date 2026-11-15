@@ -6,6 +6,7 @@ pyyaml
 click
 streamlit
 anthropic
+scikit-learn>=1.4  # ML stock pickers (lumisafe/signals/ml.py)
 # tests
 pytest
 hypothesis
