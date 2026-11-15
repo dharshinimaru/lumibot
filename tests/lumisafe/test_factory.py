@@ -167,3 +167,15 @@ def test_factory_has_quant_qual_and_ai_bots():
     kinds = {b.kind for b in bots}
     assert kinds == {"quant", "qual", "ai"} and len(bots) == 34 + 2 + 3
     assert {b.horizon for b in bots} == {"short", "long"}
+
+
+def test_autostart_plist_runs_the_factory_from_the_repo_and_restarts():
+    from lumisafe.factory import autostart
+
+    p = autostart.build_plist("/py", "/repo", "/log", None)
+    assert p["ProgramArguments"][-5:] == ["/py", "-m", "lumisafe", "factory", "run"]
+    assert p["ProgramArguments"][0] == "/usr/bin/caffeinate"
+    assert p["WorkingDirectory"] == "/repo"  # .env is found relative to the repo, as by hand
+    assert p["KeepAlive"] and p["RunAtLoad"] and p["ThrottleInterval"] >= 60
+    assert "LUMISAFE_HOME" not in p["EnvironmentVariables"]
+    assert not any("live" in a for a in p["ProgramArguments"])  # paper factory only

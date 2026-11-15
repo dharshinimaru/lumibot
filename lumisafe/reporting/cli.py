@@ -735,6 +735,28 @@ def factory_status():
     click.echo("\n" + DISCLAIMER)
 
 
+@factory.command("autostart")
+@click.argument("action", type=click.Choice(["on", "off", "status"]), default="status")
+def factory_autostart(action):
+    """Start the factory automatically at login and keep it running (macOS launchd). on / off / status."""
+    from lumisafe.factory import autostart
+
+    if action == "on":
+        try:
+            p = autostart.install()
+        except RuntimeError as exc:
+            click.echo(f"Could not turn on autostart: {exc}")
+            sys.exit(1)
+        click.echo(f"Autostart ON. The factory starts at login, restarts if it crashes and keeps the Mac awake "
+                   f"while plugged in.\n  job: {p}\n  log: {autostart.log_path()}\n"
+                   f"  status: {autostart.status()}\nTurn off with `lumisafe factory autostart off`.")
+    elif action == "off":
+        removed = autostart.uninstall()
+        click.echo("Autostart OFF." if removed else "Autostart was not on.")
+    else:
+        click.echo(f"Autostart: {autostart.status()}  (log: {autostart.log_path()})")
+
+
 @factory.command("dashboard")
 def factory_dashboard():
     """Open the live dashboard in your browser."""
