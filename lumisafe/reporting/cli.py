@@ -642,6 +642,34 @@ def signals_scorecard():
     click.echo("\n" + DISCLAIMER)
 
 
+@signals.command("zoo")
+def signals_zoo():
+    """Test 34 classic strategies on real 2016-2026 data with the pre-registered pass rules (lumisafe/signals/zoo.py)."""
+    import json as _json
+
+    import pandas as pd
+
+    from lumisafe.adapters.alpaca_data import AlpacaMarketData
+    from lumisafe.daytrade.universe import POOL
+    from lumisafe.signals import study, zoo
+
+    from lumisafe.adapters import lumibot_bridge as bridge
+
+    bridge.load_dotenv_file(".env")
+    md = AlpacaMarketData(cache=paths.cache_dir() / "zoo")
+    end = datetime.now(timezone.utc).date() - timedelta(days=1)
+    bars = md.daily_bars(sorted(set(POOL) | set(zoo.ETFS)), datetime(2016, 1, 1).date(), end, adjustment="all")
+    f = paths.cache_dir() / "spreads.json"
+    spreads = _json.loads(f.read_text()) if f.is_file() else {}
+    out = zoo.run({k: v for k, v in bars.items() if len(v)}, study.spread_model(spreads), progress=lambda m: None)
+    click.echo(zoo.format_zoo(out))
+    path = paths.reports_dir() / f"zoo_{datetime.now():%Y%m%d_%H%M%S}.json"
+    path.write_text(_json.dumps({"trials": out["trials"], "benchmarks": out["benchmarks"],
+                                 "results": [r.__dict__ for r in out["results"]]}, indent=1, default=str))
+    click.echo(f"\nReport saved to {path}")
+    click.echo("\n" + DISCLAIMER)
+
+
 @main.command("reset-halt")
 @click.argument("what", type=click.Choice(["satellite"]))
 def reset_halt(what):
