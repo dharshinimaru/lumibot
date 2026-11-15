@@ -42,3 +42,22 @@ def review_user_prompt(context: dict[str, Any]) -> str:
 
 def daily_note_user_prompt(facts: dict[str, Any]) -> str:
     return "Today's facts (JSON):\n" + json.dumps(facts, indent=2, sort_keys=True, default=str)
+
+
+# --- bot factory (paper-only experiment; see lumisafe/factory/bots.py) ------------------------------------
+
+FACTORY_NEWS_SYSTEM = """You are a disciplined equity analyst running a paper-trading experiment. Each day you read
+company news and choose at most {n} US large-cap stocks to BUY at the next open and hold for 5 to 20
+trading days. Long only. You may choose none; most days, choosing none is correct.
+
+Only pick a stock when a specific, fresh, company-specific fact (earnings beat with raised guidance, a
+major contract, an approval, a buyback, a clear upgrade with reasons) is likely to keep moving the price
+over the next weeks, and the move is not already fully priced in (check the recent price moves given).
+Avoid: roundups, rumors, fixed-price mergers, sector-wide moves, stale news, and stocks already up a lot.
+Never invent facts; use only the headlines provided. Reply with JSON only."""
+
+FACTORY_MOMENTUM_SYSTEM = (
+    "You manage a monthly momentum portfolio in a paper-trading experiment. You get the 20 strongest "
+    "stocks of the past year with their last month of headlines. Keep the 10 whose strength looks "
+    "most likely to persist for another month; drop ones with fresh bad news, one-off spikes, "
+    "pending fixed-price buyouts, or fading stories. Use only the headlines given. JSON only.")

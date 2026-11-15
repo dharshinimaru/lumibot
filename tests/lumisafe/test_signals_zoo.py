@@ -73,3 +73,12 @@ def test_every_strategy_runs_end_to_end_on_synthetic_data():
     assert out["trials"] == 34 and len(out["results"]) == 34
     assert all(0.0 <= r.dsr <= 1.0 for r in out["results"])
     assert "Passed all three tests" in zoo.format_zoo(out)
+
+
+def test_an_unfinished_month_or_week_is_not_a_rebalance_day():
+    days = pd.bdate_range("2026-10-01", "2026-11-13")  # data ends mid-month, on a Friday
+    me = zoo.month_ends(days)
+    assert me[-1] == pd.Timestamp("2026-10-30") and pd.Timestamp("2026-11-13") not in me
+    we = zoo.week_ends(pd.bdate_range("2026-11-02", "2026-11-11"))  # ends on a Wednesday
+    assert we[-1] == pd.Timestamp("2026-11-06")
+    assert zoo.week_ends(pd.bdate_range("2026-11-02", "2026-11-13"))[-1] == pd.Timestamp("2026-11-13")

@@ -670,6 +670,81 @@ def signals_zoo():
     click.echo("\n" + DISCLAIMER)
 
 
+# --- bot factory (paper, virtual books) -------------------------------------------------------------------
+
+
+@main.group()
+def factory():
+    """Bot factory: many paper bots (quant, news rules, AI) graded live against benchmarks."""
+
+
+def _factory():
+    from lumisafe.adapters import lumibot_bridge as bridge
+    from lumisafe.factory.run import default_factory
+
+    bridge.load_dotenv_file(".env")
+    return default_factory(log=lambda m: click.echo(m))
+
+
+@factory.command("run")
+def factory_run():
+    """Run the factory: decisions before each open and after each close, live marks every 5 minutes."""
+    f = _factory()
+    click.echo(f"Bot factory (paper): {len(f.bots)} bots. AI bots: {'ON' if f.llm else 'OFF (no ANTHROPIC_API_KEY)'}. "
+               "Dashboard: `lumisafe factory dashboard`. Ctrl-C to stop.")
+    f.loop()
+
+
+@factory.command("once")
+def factory_once():
+    """One check right now (decide if due, then re-grade). Handy for cron/launchd or testing."""
+    from lumisafe.factory.run import NY
+
+    f = _factory()
+    for m in f.step(datetime.now(NY)):
+        click.echo(m)
+    st = f.grade(datetime.now(NY))
+    click.echo(f"Graded {len(st['bots'])} bots through the {st['as_of_close']} close.")
+
+
+@factory.command("status")
+def factory_status():
+    """Leaderboard and latest orders in the terminal."""
+    from lumisafe.factory import engine
+
+    st = engine.read_state()
+    if st is None:
+        click.echo("No factory data yet. Run `lumisafe factory run` (or `lumisafe factory once`).")
+        return
+    click.echo(f"Updated {st['updated_at']} (prices through the {st['as_of_close']} close)\n")
+    rows = sorted(st["bots"], key=lambda b: (b["metrics"] or {}).get("excess") or -9, reverse=True)
+    click.echo(f"{'bot':<30} {'type':<5} {'days':>4} {'since start':>11} {'vs bench':>9}  verdict")
+    for b in rows:
+        m = b["metrics"] or {}
+        tot = f"{m['total']:+.2%}" if m.get("total") is not None else "-"
+        ex = f"{m['excess']:+.2%}" if m.get("excess") is not None else "-"
+        click.echo(f"{b['name']:<30} {b['kind']:<5} {m.get('days', 0):>4} {tot:>11} {ex:>9}  {b['verdict']}")
+    click.echo("\nLatest orders:")
+    n = 0
+    for b in rows:
+        for c in b["latest_changes"][:6]:
+            click.echo(f"  {b['name']} (after {b['latest_decision_day']} close): {c}")
+            n += 1
+    if not n:
+        click.echo("  none yet")
+    click.echo("\n" + DISCLAIMER)
+
+
+@factory.command("dashboard")
+def factory_dashboard():
+    """Open the live dashboard in your browser."""
+    import subprocess
+    from pathlib import Path
+
+    page = Path(__file__).with_name("factory_dashboard.py")
+    subprocess.run([sys.executable, "-m", "streamlit", "run", str(page)], check=False)
+
+
 @main.command("reset-halt")
 @click.argument("what", type=click.Choice(["satellite"]))
 def reset_halt(what):

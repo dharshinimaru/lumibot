@@ -38,7 +38,8 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
+from functools import lru_cache
 from statistics import NormalDist
 from typing import Callable
 
@@ -81,15 +82,37 @@ def build(bars: dict[str, pd.DataFrame], top_n: int = 100) -> Data:
     return Data(C, O, V, U.reindex(columns=C.columns, fill_value=False), stocks)
 
 
+@lru_cache(maxsize=256)
+def _more_sessions_in(last: pd.Timestamp, period: str) -> bool:
+    """True if the NYSE trades again after ``last`` in the same month/ISO week (so ``last`` isn't its end).
+
+    Without this, the final day of the data always looks like a month end, which in live use would make
+    every monthly bot rebalance daily (found on the first live factory run, 2026-11-14)."""
+    from lumisafe.daytrade.universe import sessions
+
+    d = last.date()
+    if period == "month":
+        end = (last + pd.offsets.MonthEnd(0)).date()
+    else:
+        end = d + timedelta(days=6 - d.weekday())
+    return end > d and any(x.day > d for x in sessions(d + timedelta(days=1), end))
+
+
+def _drop_unfinished(ends: pd.DatetimeIndex, period: str) -> pd.DatetimeIndex:
+    if len(ends) and _more_sessions_in(pd.Timestamp(ends[-1]), period):
+        return ends[:-1]
+    return ends
+
+
 def month_ends(days: pd.DatetimeIndex) -> pd.DatetimeIndex:
     s = pd.Series(days, index=days)
-    return pd.DatetimeIndex(s.groupby([days.year, days.month]).max().values)
+    return _drop_unfinished(pd.DatetimeIndex(s.groupby([days.year, days.month]).max().values), "month")
 
 
 def week_ends(days: pd.DatetimeIndex) -> pd.DatetimeIndex:
     s = pd.Series(days, index=days)
     iso = days.isocalendar()
-    return pd.DatetimeIndex(s.groupby([iso.year.values, iso.week.values]).max().values)
+    return _drop_unfinished(pd.DatetimeIndex(s.groupby([iso.year.values, iso.week.values]).max().values), "week")
 
 
 def _hold(sparse: dict[pd.Timestamp, dict[str, float]], data: Data) -> pd.DataFrame:
