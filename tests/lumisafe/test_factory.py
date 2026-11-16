@@ -179,3 +179,26 @@ def test_autostart_plist_runs_the_factory_from_the_repo_and_restarts():
     assert p["KeepAlive"] and p["RunAtLoad"] and p["ThrottleInterval"] >= 60
     assert "LUMISAFE_HOME" not in p["EnvironmentVariables"]
     assert not any("live" in a for a in p["ProgramArguments"])  # paper factory only
+
+
+def test_live_prices_fall_back_to_delayed_sip_on_a_free_plan():
+    from types import SimpleNamespace
+
+    from lumisafe.adapters.alpaca_data import LiveMarketData
+
+    idx = pd.MultiIndex.from_product([["SPY"], pd.to_datetime(["2026-11-13", "2026-11-16"], utc=True)])
+    frame = pd.DataFrame({"open": [1.0, 2], "high": [1.0, 2], "low": [1.0, 2], "close": [1.0, 2], "volume": [1, 1]},
+                         index=idx)
+    calls = []
+
+    class Client:
+        def get_stock_bars(self, req):
+            calls.append(req.end)
+            if req.end is None:
+                raise RuntimeError('{"message":"subscription does not permit querying recent SIP data"}')
+            return SimpleNamespace(df=frame)
+
+    md = SimpleNamespace(limiter=SimpleNamespace(wait=lambda: None), _stock_client=lambda: Client())
+    out = LiveMarketData(md).recent_daily(["SPY"], days=7, adjustment="all")
+    assert len(calls) == 2 and calls[0] is None and calls[1] is not None  # one try, then delayed, no retry storm
+    assert list(out["SPY"]["close"]) == [1.0, 2.0]

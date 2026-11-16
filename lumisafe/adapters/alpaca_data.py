@@ -55,9 +55,9 @@ def _retry(fn, tries: int = 5):
         try:
             return fn()
         except Exception as exc:  # network blips and 429s: back off and retry
-            if attempt == tries - 1:
-                raise
             msg = str(exc).lower()
+            if attempt == tries - 1 or "subscription does not permit" in msg:  # a plan limit won't heal
+                raise
             time.sleep(min(60, (2 ** attempt) * (5 if "429" in msg or "rate" in msg else 1)))
 
 
@@ -256,10 +256,20 @@ class LiveMarketData:
         start = datetime.now(timezone.utc) - timedelta(days=days)
         for i in range(0, len(symbols), 50):
             chunk = symbols[i:i + 50]
-            req = StockBarsRequest(symbol_or_symbols=chunk, timeframe=TimeFrame.Day, start=start,
-                                   adjustment=Adjustment(adjustment), feed=DataFeed.SIP)
-            self.md.limiter.wait()
-            df = _retry(lambda: self.md._stock_client().get_stock_bars(req).df)
+            def get(end=None):
+                req = StockBarsRequest(symbol_or_symbols=chunk, timeframe=TimeFrame.Day, start=start, end=end,
+                                       adjustment=Adjustment(adjustment), feed=DataFeed.SIP)
+                self.md.limiter.wait()
+                return _retry(lambda: self.md._stock_client().get_stock_bars(req).df)
+
+            try:
+                df = get()
+            except Exception as exc:
+                # Free Alpaca plans may not query the last 15 minutes of SIP data. Fall back to real
+                # SIP bars that end 16 minutes ago (today's bar is then slightly stale, never made up).
+                if "subscription does not permit" not in str(exc):
+                    raise
+                df = get(datetime.now(timezone.utc) - timedelta(minutes=16))
             for s in chunk:
                 if df is not None and len(df) and s in df.index.get_level_values(0):
                     d = df.xs(s, level=0)[["open", "high", "low", "close", "volume"]].copy()
