@@ -115,7 +115,10 @@ class AlpacaMarketData:
             chunk = todo[i:i + 50]
             req = StockBarsRequest(symbol_or_symbols=chunk, timeframe=TimeFrame.Day,
                                    start=datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc),
-                                   end=datetime.combine(end, datetime.max.time(), tzinfo=timezone.utc),
+                                   # free plans can't query the last 15 minutes of SIP; a finished day's bar is
+                                   # complete long before then, so ending 16 minutes ago loses nothing
+                                   end=min(datetime.combine(end, datetime.max.time(), tzinfo=timezone.utc),
+                                           datetime.now(timezone.utc) - timedelta(minutes=16)),
                                    adjustment=Adjustment(adjustment), feed=DataFeed.SIP)
             self.limiter.wait()
             df = _retry(lambda: self._stock_client().get_stock_bars(req).df)
